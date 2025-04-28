@@ -2,10 +2,7 @@
 import json
 import os
 from openai import OpenAI
-from agents import (
-    triage_agent, flight_agent, hotel_agent, itinerary_agent, 
-    process_tool_calls, conversation_state
-)
+from agents import flight_agent, hotel_agent, itinerary_agent, supervisor, process_tool_calls, conversation_state
 from config import OPENAI_API_KEY, MODEL_NAME
 
 # Initialize OpenAI client
@@ -15,9 +12,9 @@ def main():
     """Run the travel assistant."""
     # Store conversation messages
     messages = []
-    current_agent = "triage_agent"
+    current_agent = "supervisor"
     agent_definitions = {
-        "triage_agent": triage_agent,
+        "supervisor": supervisor,
         "flight_agent": flight_agent,
         "hotel_agent": hotel_agent,
         "itinerary_agent": itinerary_agent
