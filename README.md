@@ -14,7 +14,7 @@ A sophisticated multi-agent system for travel planning, leveraging OpenAI's API 
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/Multi-Ai-Agent-Microsoft-Hackathon.git
+git clone https://github.com/MrCyberNaut/Multi-Ai-Agent-Microsoft-Hackathon.git
 cd Multi-Ai-Agent-Microsoft-Hackathon
 ```
 
