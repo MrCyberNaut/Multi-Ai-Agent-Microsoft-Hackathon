@@ -692,7 +692,16 @@ def itinerary_agent(state: TravelState) -> Dict[str, Any]:
     debug_print("itinerary_agent called")
     
     messages = state.messages.copy()
-    messages.append({"role": "system", "content": ITINERARY_AGENT_PROMPT})
+    
+    # Enhanced prompt to include instructions about ending the conversation
+    enhanced_prompt = ITINERARY_AGENT_PROMPT + """
+
+When you've completed creating a full itinerary or answered the user's question completely, 
+end your message with 'This completes your final itinerary. Is there anything else you'd like to know?'
+This will help ensure the conversation reaches a natural conclusion.
+"""
+    
+    messages.append({"role": "system", "content": enhanced_prompt})
     
     debug_print(f"Calling itinerary agent LLM with {len(messages)} messages")
     try:
@@ -715,11 +724,46 @@ def itinerary_agent(state: TravelState) -> Dict[str, Any]:
         debug_print(error_msg)
         return {"messages": messages, "error": error_msg}
 
+def router(state: TravelState) -> str:
+    """Route messages based on content."""
+    if not state.messages or len(state.messages) == 0:
+        debug_print("No messages found, routing to supervisor")
+        return "supervisor"
+        
+    last_message = state.messages[-1]["content"].lower() if state.messages[-1].get("content") else ""
+    debug_print(f"Routing based on message: {last_message[:50]}...")
+    
+    # Check for terminal conditions
+    if "final itinerary" in last_message or "thank you" in last_message or "goodbye" in last_message:
+        debug_print("Terminal condition detected, ending graph")
+        return END
+    
+    # Add recursion counter to prevent infinite loops
+    if len(state.messages) > 20:  # Set a reasonable threshold
+        debug_print("Message count threshold exceeded, ending graph to prevent recursion")
+        return END
+    
+    if "flight" in last_message or "book a trip" in last_message:
+        debug_print("Routing to flight_agent")
+        return "flight_agent"
+    elif "hotel" in last_message or "accommodation" in last_message:
+        debug_print("Routing to hotel_agent")
+        return "hotel_agent"
+    elif "itinerary" in last_message or "plan" in last_message:
+        debug_print("Routing to itinerary_agent")
+        return "itinerary_agent"
+    else:
+        debug_print("No specific route found, defaulting to supervisor")
+        return "supervisor"
+
 def create_travel_graph() -> StateGraph:
     """Create the travel assistant graph."""
     debug_print("Creating travel assistant graph")
     workflow = StateGraph(TravelState)
-
+    
+    # Set recursion limit directly on the StateGraph instance
+    workflow.recursion_limit = 50
+    
     # Add nodes
     debug_print("Adding graph nodes")
     workflow.add_node("supervisor", supervisor_agent)
@@ -727,34 +771,13 @@ def create_travel_graph() -> StateGraph:
     workflow.add_node("hotel_agent", hotel_agent)
     workflow.add_node("itinerary_agent", itinerary_agent)
 
-    # Define router function to determine next node
-    def router(state: TravelState) -> str:
-        """Route messages based on content."""
-        if not state.messages or len(state.messages) == 0:
-            debug_print("No messages found, routing to supervisor")
-            return "supervisor"
-            
-        last_message = state.messages[-1]["content"].lower() if state.messages[-1].get("content") else ""
-        debug_print(f"Routing based on message: {last_message[:50]}...")
-        
-        if "flight" in last_message or "book a trip" in last_message:
-            debug_print("Routing to flight_agent")
-            return "flight_agent"
-        elif "hotel" in last_message or "accommodation" in last_message:
-            debug_print("Routing to hotel_agent")
-            return "hotel_agent"
-        elif "itinerary" in last_message or "plan" in last_message:
-            debug_print("Routing to itinerary_agent")
-            return "itinerary_agent"
-        else:
-            debug_print("No specific route found, defaulting to supervisor")
-            return "supervisor"
+    # Define router function is outside this function (see above)
     
     # Edges
     debug_print("Adding graph edges")
     workflow.set_entry_point("supervisor")
     
-    # Add conditional edges from supervisor to other agents
+    # Add conditional edges from supervisor to other agents and END
     workflow.add_conditional_edges(
         "supervisor",
         router,
@@ -762,15 +785,16 @@ def create_travel_graph() -> StateGraph:
             "flight_agent": "flight_agent",
             "hotel_agent": "hotel_agent",
             "itinerary_agent": "itinerary_agent",
-            "supervisor": "supervisor"
+            "supervisor": "supervisor",
+            END: END  # Add explicit END option
         }
     )
     
-    # Add simple edges from agents back to supervisor
+    # Add edges from agents back to supervisor
     workflow.add_edge("flight_agent", "supervisor")
     workflow.add_edge("hotel_agent", "supervisor")
     workflow.add_edge("itinerary_agent", "supervisor")
-
+    
     debug_print("Graph created and compiled")
     return workflow.compile()
 

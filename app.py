@@ -527,7 +527,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 # Chat input and search button
 col1, col2 = st.columns([5, 1])
 with col1:
-    user_input = st.text_input("", placeholder="Tell me about your travel plans...", key="user_input")
+    # Use a callback to process the input instead of modifying session state directly
+    user_input = st.text_input("", placeholder="Tell me about your travel plans...", key="user_input_field")
 with col2:
     if st.session_state.chat_stage == "ready_to_search":
         search_button = st.button("Search Now")
@@ -537,8 +538,8 @@ with col2:
 # Process user input
 if user_input:
     handle_user_message(user_input)
-    # Clear the input box
-    st.session_state.user_input = ""
+    # Don't try to clear input field by modifying session state directly
+    # Streamlit will handle this on rerun
     
 # Process search button
 if search_button:
