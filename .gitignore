@@ -39,3 +39,7 @@ ENV/
 
 # Local development settings
 config.local.py 
+
+cache/
+installed_lib_checker.py
+reference.py

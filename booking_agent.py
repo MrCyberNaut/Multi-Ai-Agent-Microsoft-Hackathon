@@ -6,16 +6,20 @@ from typing import Dict, Any, List, Optional, Union, Tuple
 from dotenv import load_dotenv
 from openai import OpenAI
 from serpapi import GoogleSearch
-from langgraph.graph import StateGraph, START, END, Parallel
+from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
+import streamlit as st
+import sys
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+AIMLAPI_API_KEY = os.getenv("AIMLAPI_API_KEY")
+AIMLAPI_BASE_URL = "https://api.aimlapi.com/v1"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Kept for backward compatibility
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
-MODEL_NAME = "gpt-4"
+MODEL_NAME = "gpt-4o"
 TEMPERATURE = 0.7
 MAX_TOKENS = 1500
 CACHE_DIR = "cache"
@@ -24,8 +28,15 @@ HITL_TIMEOUT = 300
 SERPAPI_TIMEOUT = 30
 SERPAPI_CACHE_DURATION = 3600
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize AIMLAPI client (compatible with OpenAI SDK)
+if AIMLAPI_API_KEY:
+    client = OpenAI(
+        api_key=AIMLAPI_API_KEY,
+        base_url=AIMLAPI_BASE_URL
+    )
+else:
+    # Fallback to OpenAI if AIMLAPI key is not set
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 # State Management
 class TravelState(BaseModel):
@@ -123,114 +134,173 @@ def search_flights_serp(origin: str, destination: str, departure_date: str, retu
     if not SERPAPI_API_KEY:
         raise ValueError("SERPAPI_API_KEY is not set in environment variables")
     
-    query = f"flights from {origin} to {destination} on {departure_date}"
     query_hash = f"flights_{origin}_{destination}_{departure_date}"
     
     cached = _get_cached_results(query_hash)
     if cached:
         return cached
     
+    # Updated parameters based on SerpAPI documentation
     params = {
         "engine": "google_flights",
-        "q": query,
-        "api_key": SERPAPI_API_KEY,
+        "departure_id": origin.upper(),  # Ensure uppercase IATA code
+        "arrival_id": destination.upper(),  # Ensure uppercase IATA code
+        "outbound_date": departure_date,  # Use outbound_date instead of date
         "hl": "en",
         "gl": "us",
-        "departure_id": origin,
-        "arrival_id": destination,
-        "date": departure_date,
-        "return_date": return_date,
         "currency": "USD",
-        "type": "2"  # Round trip
+        "api_key": SERPAPI_API_KEY
     }
     
-    search = GoogleSearch(params)
-    results = search.get_dict()
+    # Add return date for round trips
+    if return_date:
+        params["return_date"] = return_date
+        params["type"] = "2"  # Round trip
     
-    flights = []
-    if 'flights_results' in results:
-        for flight in results['flights_results']:
-            flight_info = {
-                "airline": flight.get('airline', 'Unknown'),
-                "flight_number": flight.get('flight_id', 'Unknown'),
-                "price": flight.get('price', 'Unknown'),
-                "departure": flight.get('departure_time', 'Unknown'),
-                "arrival": flight.get('arrival_time', 'Unknown'),
-                "duration": flight.get('duration', 'Unknown'),
-                "stops": flight.get('stops', 'Unknown')
-            }
-            if budget and flight.get('price'):
-                if float(flight['price'].replace('$', '')) <= float(budget.replace('$', '')):
-                    flights.append(flight_info)
-            else:
+    # Add budget as max_price if provided
+    if budget:
+        try:
+            # Convert to numeric value without $
+            budget_value = float(budget.replace('$', '').strip())
+            params["max_price"] = budget_value
+        except:
+            pass
+    
+    try:
+        st.write("Searching for flights...") if 'st' in globals() else print("Searching for flights...")
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        
+        flights = []
+        # Check for API error response
+        if "error" in results:
+            print(f"SerpAPI error: {results['error']}")
+            _cache_results(query_hash, [])
+            return []
+            
+        if "best_flights" in results:
+            # Extract flight details from best_flights
+            for flight in results.get("best_flights", []):
+                flight_info = {
+                    "airline": flight.get('airline', 'Unknown'),
+                    "flight_number": flight.get('flight_id', 'Unknown'),
+                    "price": flight.get('price', 'Unknown'),
+                    "duration": flight.get('total_duration', 'Unknown'),
+                    "stops": flight.get('layovers', [])
+                }
+                
+                # Extract departure and arrival details
+                flights_details = flight.get('flights', [])
+                if flights_details:
+                    first_flight = flights_details[0]
+                    last_flight = flights_details[-1]
+                    
+                    departure_airport = first_flight.get('departure_airport', {})
+                    arrival_airport = last_flight.get('arrival_airport', {})
+                    
+                    flight_info["departure"] = departure_airport.get('time', 'Unknown')
+                    flight_info["arrival"] = arrival_airport.get('time', 'Unknown')
+                
                 flights.append(flight_info)
-    
-    _cache_results(query_hash, flights)
-    return flights
+        
+        # For debugging - save full response if no flights found
+        if not flights:
+            with open(f"cache/debug_{query_hash}.json", "w") as f:
+                json.dump(results, f)
+                
+        _cache_results(query_hash, flights)
+        return flights
+        
+    except Exception as e:
+        print(f"Error in SerpAPI flight search: {str(e)}")
+        _cache_results(query_hash, [])
+        return []
 
 def search_hotels_serp(location: str, check_in: str, check_out: str, budget: Optional[str] = None) -> List[Dict[str, Any]]:
     """Search for hotels using SerpAPI."""
     if not SERPAPI_API_KEY:
         raise ValueError("SERPAPI_API_KEY is not set in environment variables")
     
-    query = f"hotels in {location} check in {check_in} check out {check_out}"
     query_hash = f"hotels_{location}_{check_in}_{check_out}"
     
     cached = _get_cached_results(query_hash)
     if cached:
         return cached
     
+    # Updated parameters based on SerpAPI documentation
     params = {
         "engine": "google_hotels",
-        "q": query,
-        "api_key": SERPAPI_API_KEY,
-        "hl": "en",
-        "gl": "us",
+        "q": f"hotels in {location}",  # Search query
+        "location": location,
         "check_in_date": check_in,
         "check_out_date": check_out,
-        "location": location,
-        "currency": "USD"
+        "hl": "en",
+        "gl": "us",
+        "currency": "USD",
+        "api_key": SERPAPI_API_KEY
     }
     
-    search = GoogleSearch(params)
-    results = search.get_dict()
+    # Add budget as price constraint if provided
+    if budget:
+        try:
+            budget_value = float(budget.replace('$', '').strip())
+            params["price_max"] = budget_value
+        except:
+            pass
     
-    hotels = []
-    if 'hotels_results' in results:
-        for hotel in results['hotels_results']:
-            hotel_info = {
-                "name": hotel.get('name', 'Unknown'),
-                "price": hotel.get('price', 'Unknown'),
-                "rating": hotel.get('rating', 0),
-                "amenities": hotel.get('amenities', []),
-                "address": hotel.get('address', 'Unknown'),
-                "website": hotel.get('website', 'Unknown'),
-                "reviews": hotel.get('reviews', [])
-            }
-            if budget and hotel.get('price'):
-                if float(hotel['price'].replace('$', '').split('/')[0]) <= float(budget.replace('$', '')):
-                    hotels.append(hotel_info)
-            else:
+    try:
+        st.write("Searching for hotels...") if 'st' in globals() else print("Searching for hotels...")
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        
+        hotels = []
+        # Check for API error response
+        if "error" in results:
+            print(f"SerpAPI error: {results['error']}")
+            _cache_results(query_hash, [])
+            return []
+            
+        if "hotels_results" in results:
+            for hotel in results["hotels_results"]:
+                hotel_info = {
+                    "name": hotel.get('name', 'Unknown'),
+                    "price": hotel.get('price', 'Unknown'),
+                    "rating": hotel.get('rating', 0),
+                    "amenities": hotel.get('amenities', []),
+                    "address": hotel.get('address', 'Unknown'),
+                    "website": hotel.get('website', 'Unknown'),
+                    "reviews": hotel.get('reviews', [])
+                }
                 hotels.append(hotel_info)
-    
-    _cache_results(query_hash, hotels)
-    return hotels
+        
+        # For debugging - save full response if no hotels found
+        if not hotels:
+            with open(f"cache/debug_{query_hash}.json", "w") as f:
+                json.dump(results, f)
+                
+        _cache_results(query_hash, hotels)
+        return hotels
+        
+    except Exception as e:
+        print(f"Error in SerpAPI hotel search: {str(e)}")
+        _cache_results(query_hash, [])
+        return []
 
 def get_destination_info_serp(destination: str) -> Dict[str, Any]:
     """Get destination information using SerpAPI."""
     if not SERPAPI_API_KEY:
         raise ValueError("SERPAPI_API_KEY is not set in environment variables")
     
-    query = f"travel guide {destination} tourist attractions"
     query_hash = f"destination_{destination}"
     
     cached = _get_cached_results(query_hash)
     if cached:
         return cached
     
+    # Updated parameters for better destination information
     params = {
         "engine": "google",
-        "q": query,
+        "q": f"travel guide {destination} tourist attractions things to do",
         "api_key": SERPAPI_API_KEY,
         "hl": "en",
         "gl": "us",
@@ -239,42 +309,80 @@ def get_destination_info_serp(destination: str) -> Dict[str, Any]:
         "num": 10
     }
     
-    search = GoogleSearch(params)
-    results = search.get_dict()
-    
-    info = {
-        "name": destination,
-        "description": "",
-        "attractions": [],
-        "weather": "",
-        "best_time_to_visit": "",
-        "local_tips": []
-    }
-    
-    if 'knowledge_graph' in results:
-        kg = results['knowledge_graph']
-        info.update({
-            "description": kg.get('description', ''),
-            "weather": kg.get('weather', ''),
-            "timezone": kg.get('timezone', ''),
-            "currency": kg.get('currency', ''),
-            "languages": kg.get('languages', [])
-        })
-    
-    if 'organic_results' in results:
-        attractions = []
-        tips = []
-        for result in results['organic_results'][:5]:
-            if 'attractions' in result['title'].lower():
-                attractions.extend(result.get('attractions', []))
-            if 'tips' in result['title'].lower() or 'guide' in result['title'].lower():
-                tips.append(result['snippet'])
+    try:
+        st.write("Looking up destination information...") if 'st' in globals() else print("Looking up destination information...")
+        search = GoogleSearch(params)
+        results = search.get_dict()
         
-        info['attractions'] = attractions[:5]
-        info['local_tips'] = tips[:3]
-    
-    _cache_results(query_hash, info)
-    return info
+        # Check for API error response
+        if "error" in results:
+            print(f"SerpAPI error: {results['error']}")
+            _cache_results(query_hash, {})
+            return {}
+        
+        info = {
+            "name": destination,
+            "description": "",
+            "attractions": [],
+            "weather": "",
+            "best_time_to_visit": "",
+            "local_tips": []
+        }
+        
+        if 'knowledge_graph' in results:
+            kg = results['knowledge_graph']
+            info.update({
+                "description": kg.get('description', ''),
+                "weather": kg.get('weather', ''),
+                "timezone": kg.get('timezone', ''),
+                "currency": kg.get('currency', ''),
+                "languages": kg.get('languages', [])
+            })
+        
+        if 'organic_results' in results:
+            attractions = []
+            tips = []
+            for result in results['organic_results'][:5]:
+                title = result.get('title', '').lower()
+                snippet = result.get('snippet', '')
+                
+                # Extract attractions
+                if any(word in title for word in ['attractions', 'things to do', 'places to visit']):
+                    # Try to extract bulleted list items
+                    if 'list' in result:
+                        attractions.extend([item.get('title', '') for item in result.get('list', [])])
+                    elif snippet:
+                        # Extract potential attractions from snippet
+                        lines = snippet.split('.')
+                        attractions.extend([line.strip() for line in lines if len(line.strip()) > 15 and len(line.strip()) < 100])
+                
+                # Extract tips
+                if any(word in title for word in ['tips', 'guide', 'advice', 'travel']):
+                    tips.append(snippet)
+            
+            # Fallback to getting attractions from knowledge graph
+            if not attractions and 'attractions' in kg:
+                attractions = kg.get('attractions', [])
+            
+            # Clean up attractions and tips
+            attractions = [a for a in attractions if a and len(a.strip()) > 3]
+            tips = [t for t in tips if t and len(t.strip()) > 20]
+            
+            info['attractions'] = attractions[:5]
+            info['local_tips'] = tips[:3]
+        
+        # Save debug information if we didn't find useful content
+        if not info['description'] and not info['attractions']:
+            with open(f"cache/debug_{query_hash}.json", "w") as f:
+                json.dump(results, f)
+        
+        _cache_results(query_hash, info)
+        return info
+        
+    except Exception as e:
+        print(f"Error in SerpAPI destination search: {str(e)}")
+        _cache_results(query_hash, {})
+        return {}
 
 # Human-in-the-Loop Functions
 def get_human_approval(data: Dict[str, Any], context: str) -> bool:
@@ -389,44 +497,48 @@ def itinerary_agent(state: TravelState) -> Dict[str, Any]:
 def create_travel_graph() -> StateGraph:
     """Create the travel assistant graph."""
     workflow = StateGraph(TravelState)
-    
+
     # Add nodes
     workflow.add_node("supervisor", supervisor_agent)
     workflow.add_node("flight_agent", flight_agent)
     workflow.add_node("hotel_agent", hotel_agent)
     workflow.add_node("itinerary_agent", itinerary_agent)
-    
-    # Add parallel search node
-    parallel_search = Parallel(
-        "parallel_search",
-        {
-            "flight": flight_agent,
-            "hotel": hotel_agent
-        }
-    )
-    workflow.add_node("parallel_search", parallel_search)
-    
-    # Add edges
+
+    # Edges
     workflow.add_edge(START, "supervisor")
+    
+    # Supervisor dispatches in parallel
     workflow.add_edge("supervisor", "flight_agent")
     workflow.add_edge("supervisor", "hotel_agent")
-    workflow.add_edge("supervisor", "parallel_search")
-    workflow.add_edge("supervisor", "itinerary_agent")
-    workflow.add_edge("supervisor", END)
-    
+
+    # After each completes, return to supervisor
     workflow.add_edge("flight_agent", "supervisor")
     workflow.add_edge("hotel_agent", "supervisor")
-    workflow.add_edge("parallel_search", "supervisor")
+
+    # Itinerary agent handles final planning
+    workflow.add_edge("supervisor", "itinerary_agent")
     workflow.add_edge("itinerary_agent", "supervisor")
-    workflow.add_edge("itinerary_agent", END)
     
+    # End
+    workflow.add_edge("supervisor", END)
+    workflow.add_edge("itinerary_agent", END)
+
     return workflow.compile()
+
 
 def main():
     """Main entry point for the travel assistant."""
     # Initialize the graph
     graph = create_travel_graph()
     
+    # Check if running in Streamlit
+    in_streamlit = 'streamlit' in sys.modules
+    
+    if in_streamlit:
+        st.write("Travel Assistant API initialized and ready to use")
+        return graph
+    
+    # CLI mode
     print("Travel Assistant initialized. Type 'quit' to exit.")
     print("Example: I want to book a trip from NYC to Miami from May 15-20, 2025")
     
@@ -448,6 +560,8 @@ def main():
             print(f"\nError: {error_info['message']}")
             if error_info.get('resolution'):
                 print(f"Resolution: {error_info['resolution']}")
+    
+    return graph
 
 if __name__ == "__main__":
     main()
