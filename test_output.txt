@@ -1,0 +1,136 @@
+[DEBUG] Using AIMLAPI client with base URL: https://api.aimlapi.com/v1
+=== Travel Booking Agent Test ===
+Current time: 2025-05-01 02:50:44
+
+=== Testing SerpAPI Connection ===
+SERPAPI_API_KEY is set: 765df...1a669
+
+--- Testing Flight Search ---
+Searching flights: BOM to IXE, 2025-05-03 to 2025-05-06
+[DEBUG] search_flights_serp called with: origin=BOM, destination=IXE, departure_date=2025-05-03, return_date=2025-05-06
+[DEBUG] Query hash: flights_BOM_IXE_2025-05-03
+[DEBUG] Found cache file: cache\flights_BOM_IXE_2025-05-03.json
+[DEBUG] Using cached results for: flights_BOM_IXE_2025-05-03
+[DEBUG] Returning 0 cached flight results
+Flight search results: 0
+No flights found - check debug file
+API Response Keys: ['timestamp', 'results']
+
+Looking at raw API response for debugging:
+
+--- Testing Hotel Search ---
+Searching hotels in IXE, 2025-05-03 to 2025-05-06
+[DEBUG] search_hotels_serp called with: location=IXE, check_in=2025-05-03, check_out=2025-05-06
+[DEBUG] Query hash: hotels_IXE_2025-05-03_2025-05-06
+[DEBUG] Found cache file: cache\hotels_IXE_2025-05-03_2025-05-06.json
+[DEBUG] Using cached results for: hotels_IXE_2025-05-03_2025-05-06
+[DEBUG] Returning 12 cached hotel results
+Hotel search results: 12
+Sample hotel:
+{
+  "name": "Hotel Ganga Sagar",
+  "description": "",
+  "address": "",
+  "price_per_night": 2652,
+  "currency": "INR",
+  "rating": 4.2,
+  "amenities": [
+    "Free breakfast",
+    "Free Wi-Fi",
+    "Parking",
+    "Air conditioning",
+    "Restaurant",
+    "Room service",
+    "Kitchen in some rooms",
+    "Full-service laundry",
+    "Child-friendly",
+    "Smoke-free property"
+  ],
+  "image_url": "https://lh5.googleusercontent.com/p/AF1QipNN3o53E7Ohz2TSd0vbHGGhOaT0Z4UkDu-BgMO-=s10000"
+}
+
+--- Testing Destination Info ---
+Getting info for Mangalore
+[DEBUG] get_destination_info_serp called with: destination=Mangalore
+[DEBUG] Query hash: destination_Mangalore
+[DEBUG] Found cache file: cache\destination_Mangalore.json
+[DEBUG] Using cached results for: destination_Mangalore
+[DEBUG] Returning cached destination info for: Mangalore
+Destination info found:
+Name: Mangalore
+No description
+Attractions: 5
+Local tips: 1
+
+=== Testing Direct API Calls with Fresh Parameters ===
+
+--- Testing Fresh Flight Search ---
+Searching flights: DEL to BOM, 2025-06-01 to 2025-06-10
+Removed existing cache file: cache/flights_DEL_BOM_2025-06-01.json
+[DEBUG] search_flights_serp called with: origin=DEL, destination=BOM, departure_date=2025-06-01, return_date=2025-06-10
+[DEBUG] Query hash: flights_DEL_BOM_2025-06-01
+[DEBUG] No cache found for: flights_DEL_BOM_2025-06-01
+[DEBUG] Searching flights with params: {'engine': 'google_flights', 'departure_id': 'DEL', 'arrival_id': 'BOM', 'outbound_date': '2025-06-01', 'return_date': '2025-06-10', 'currency': 'INR', 'hl': 'en', 'gl': 'in', 'type': '1', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
+[DEBUG] Initializing GoogleSearch for flights
+[DEBUG] Executing get_dict() for flight search
+[DEBUG] Flight search response keys: ['search_metadata', 'search_parameters', 'best_flights', 'other_flights', 'price_insights', 'airports']
+[DEBUG] Caching results to: cache\debug_flights_DEL_BOM_2025-06-01.json
+[DEBUG] No flights_results or flights found in response
+[DEBUG] Caching results to: cache\flights_DEL_BOM_2025-06-01.json
+[DEBUG] Flight search results count: 0
+Flight search results: 0
+No flights found - check debug file
+API Response Keys: ['timestamp', 'results']
+
+--- Testing Fresh Hotel Search ---
+Searching hotels in GOI, 2025-06-01 to 2025-06-10
+Removed existing cache file: cache/hotels_GOI_2025-06-01_2025-06-10.json
+[DEBUG] search_hotels_serp called with: location=GOI, check_in=2025-06-01, check_out=2025-06-10
+[DEBUG] Query hash: hotels_GOI_2025-06-01_2025-06-10
+[DEBUG] No cache found for: hotels_GOI_2025-06-01_2025-06-10
+[DEBUG] Searching hotels with params: {'engine': 'google_hotels', 'q': 'hotels in GOI', 'check_in_date': '2025-06-01', 'check_out_date': '2025-06-10', 'currency': 'INR', 'adults': 2, 'children': 0, 'hl': 'en', 'gl': 'in', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
+[DEBUG] Initializing GoogleSearch for hotels
+[DEBUG] Executing get_dict() for hotel search
+[DEBUG] Hotel search response keys: ['search_metadata', 'search_parameters', 'search_information', 'brands', 'properties', 'serpapi_pagination']
+[DEBUG] Caching results to: cache\debug_hotels_GOI_2025-06-01_2025-06-10.json
+[DEBUG] Found 20 properties in response
+[DEBUG] Adding hotel: Moustache Goa Luxuria, price: 1588
+[DEBUG] Adding hotel: The Hosteller Bam Goa, Saligao, price: 1370
+[DEBUG] Adding hotel: BHAKTI KUTIR, price: 1120
+[DEBUG] Adding hotel: Hotel Viva Baga, price: 1080
+[DEBUG] Adding hotel: Calux Joia Do Mar Resort, price: 2256
+[DEBUG] Adding hotel: Bambolim Beach Resort, price: 4500
+[DEBUG] Adding hotel: Resort De coracao - Calangute Goa, price: 4835
+[DEBUG] Adding hotel: Amigo Plaza, price: 977
+[DEBUG] Adding hotel: Ruffles Beach Resort, price: 1340
+[DEBUG] Adding hotel: The Hosteller Goa, Candolim, price: 1174
+[DEBUG] Adding hotel: Mermaid Avisa Resort, price: 1792
+[DEBUG] Adding hotel: Resort The Lohias, Candolim Goa, price: 5250
+[DEBUG] Adding hotel: Whoopers Party Hostel, Palolem, price: 883
+[DEBUG] Adding hotel: WTF My House - Hotel near Baga Beach Goa, price: 1210
+[DEBUG] Adding hotel: Rosa Bella Resort-TBV, price: 1435
+[DEBUG] Caching results to: cache\hotels_GOI_2025-06-01_2025-06-10.json
+[DEBUG] Hotel search results count: 15
+Hotel search results: 15
+Sample hotel:
+{
+  "name": "Moustache Goa Luxuria",
+  "description": "Bright quarters in a casual resort with a rooftop bar/restaurant, an outdoor pool & a hot tub.",
+  "address": "",
+  "price_per_night": 1588,
+  "currency": "INR",
+  "rating": 4.3,
+  "amenities": [
+    "Breakfast ($)",
+    "Free Wi-Fi",
+    "Free parking",
+    "Outdoor pool",
+    "Air conditioning",
+    "Bar",
+    "Restaurant",
+    "Airport shuttle",
+    "Full-service laundry",
+    "Child-friendly"
+  ],
+  "image_url": "https://lh5.googleusercontent.com/p/AF1QipNMnNI8dXOiIVPp0j0gXGP9AYWf7h9jxqustGk=s10000"
+}

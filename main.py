@@ -1,102 +1,89 @@
-"""Main entry point for the travel assistant application."""
-import json
+"""Main entry point for the multi-agent travel system."""
 import os
-from openai import OpenAI
-from agents import flight_agent, hotel_agent, itinerary_agent, supervisor, process_tool_calls, conversation_state
-from config import OPENAI_API_KEY, MODEL_NAME
+import sys
+from dotenv import load_dotenv
+from booking_agent import (
+    create_travel_graph,
+    TravelState,
+    debug_print
+)
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Load environment variables
+load_dotenv()
 
 def main():
-    """Run the travel assistant."""
-    # Store conversation messages
-    messages = []
-    current_agent = "supervisor"
-    agent_definitions = {
-        "supervisor": supervisor,
-        "flight_agent": flight_agent,
-        "hotel_agent": hotel_agent,
-        "itinerary_agent": itinerary_agent
-    }
+    """Main entry point for the CLI interface."""
+    debug_print("Initializing the travel assistant")
     
-    print("Travel Assistant initialized. Enter 'quit' to exit.")
-    print("Example query: 'I want to book a trip from NYC to Miami from May 15-20, 2025. Budget is $1500.'")
+    # Check if required environment variables are set
+    if not os.getenv("SERPAPI_API_KEY"):
+        print("Error: SERPAPI_API_KEY environment variable is not set.")
+        print("Please set it in the .env file or as an environment variable.")
+        return
     
-    # Add initial system message
-    messages.append({
-        "role": "system",
-        "content": agent_definitions[current_agent]["instructions"]
-    })
+    if not (os.getenv("AIMLAPI_API_KEY") or os.getenv("OPENAI_API_KEY")):
+        print("Error: Neither AIMLAPI_API_KEY nor OPENAI_API_KEY environment variables are set.")
+        print("Please set one of them in the .env file or as an environment variable.")
+        return
     
-    while True:
-        user_input = input("\nYou: ")
-        if user_input.lower() == "quit":
-            break
+    try:
+        # Initialize the graph
+        debug_print("Creating travel graph")
+        graph = create_travel_graph()
+        debug_print("Graph created")
         
-        # Add user message to conversation
-        messages.append({"role": "user", "content": user_input})
+        # Check if we're running in Streamlit
+        in_streamlit = 'streamlit' in sys.modules
+        if in_streamlit:
+            debug_print("Running in Streamlit, returning graph")
+            return graph
         
-        # Continue conversation until complete
+        # Start CLI interaction
+        print("\n===== Travel Assistant CLI =====")
+        print("Welcome to the Travel Assistant! How can I help you plan your trip today?")
+        print("(Type 'quit' or 'exit' to end the session)")
+        
+        # CLI interaction loop
         while True:
-            # Get response from current agent
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                tools=agent_definitions[current_agent]["tools"],
-                tool_choice="auto"
+            # Get user input
+            user_input = input("\nYou: ").strip()
+            if user_input.lower() in ["quit", "exit", "bye"]:
+                print("Thank you for using the Travel Assistant. Goodbye!")
+                break
+            
+            # Create state with user message
+            state = TravelState(
+                messages=[{"role": "user", "content": user_input}]
             )
             
-            assistant_message = response.choices[0].message
-            messages.append(assistant_message)
-            
-            # Check if the message has content to display
-            if assistant_message.content:
-                print(f"\nTravel Assistant ({current_agent}): {assistant_message.content}")
-            
-            # Check if agent used tools
-            if assistant_message.tool_calls:
-                # Process tool calls and get outputs
-                tool_outputs, next_agent = process_tool_calls(assistant_message.tool_calls)
+            # Process through the graph
+            debug_print("Running message through agent graph")
+            try:
+                has_response = False
+                # Use the stream method instead of run
+                for event in graph.stream(state):
+                    if event.get("type") == "agent":
+                        agent_name = event.get("agent", "Assistant")
+                        response_state = event.get("state")
+                        if response_state and response_state.messages and len(response_state.messages) > 0:
+                            last_message = response_state.messages[-1]
+                            if last_message["role"] == "assistant":
+                                print(f"\nAssistant: {last_message['content']}")
+                                has_response = True
                 
-                # If handoff requested, switch agents
-                if next_agent:
-                    print(f"\n[System: Switching from {current_agent} to {next_agent}]")
-                    current_agent = next_agent
+                # Fallback if no response
+                if not has_response:
+                    print("\nAssistant: I'm processing your request. Can you please provide more details?")
                     
-                    # Add new system message for the new agent
-                    messages.append({
-                        "role": "system",
-                        "content": agent_definitions[current_agent]["instructions"]
-                    })
-                    
-                    # Add context from the conversation state
-                    context_message = "Here's what we know so far:\n"
-                    if conversation_state["flight_options"]:
-                        context_message += f"- Flight options are available\n"
-                    if conversation_state["hotel_options"]:
-                        context_message += f"- Hotel options are available\n"
-                    if conversation_state["user_preferences"]:
-                        context_message += f"- User preferences: {json.dumps(conversation_state['user_preferences'], indent=2)}\n"
-                    
-                    messages.append({"role": "system", "content": context_message})
-                    
-                    # Continue to next iteration with new agent
-                    continue
-                
-                # Add tool outputs to messages
-                for tool_output in tool_outputs:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_output["tool_call_id"],
-                        "content": tool_output["output"]
-                    })
-                
-                # Continue conversation with same agent
-                continue
-            
-            # If no tool calls and no handoff, break out of the inner loop
-            break
+            except Exception as e:
+                error_msg = f"Error processing your request: {str(e)}"
+                print(f"\nAssistant: {error_msg}")
+                debug_print(f"Exception in graph execution: {error_msg}")
+    
+    except Exception as e:
+        error_msg = f"System error: {str(e)}"
+        print(f"Error: {error_msg}")
+        debug_print(f"Exception in main: {error_msg}")
 
 if __name__ == "__main__":
     main()

@@ -10,20 +10,28 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 import os
 import json
+import sys
 from booking_agent import (
     search_flights_serp,
     search_hotels_serp,
     get_destination_info_serp,
-    get_human_selection
+    get_human_selection,
+    TravelState,
+    create_travel_graph,
+    debug_print
 )
+
+# Enable debugging
+DEBUG = True
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="Travel Planner",
+    page_title="AI Travel Planner",
     page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+debug_print("Streamlit page configured")
 
 # Custom CSS for dark theme with orange accents
 st.markdown("""
@@ -58,6 +66,38 @@ st.markdown("""
         border: 2px solid #ff6b35;
     }
     
+    /* Chat container */
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 500px;
+        overflow-y: auto;
+        padding: 10px;
+        margin-bottom: 20px;
+        background-color: #3b3b3b;
+        border-radius: 10px;
+    }
+    
+    .user-message {
+        align-self: flex-end;
+        background-color: #ff6b35;
+        color: white;
+        border-radius: 10px;
+        padding: 10px;
+        margin: 5px;
+        max-width: 80%;
+    }
+    
+    .ai-message {
+        align-self: flex-start;
+        background-color: #4b4b4b;
+        color: white;
+        border-radius: 10px;
+        padding: 10px;
+        margin: 5px;
+        max-width: 80%;
+    }
+    
     /* Button styling */
     .stButton>button {
         background-color: #ff6b35;
@@ -71,40 +111,123 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+debug_print("Applied custom CSS")
 
 # Initialize session state
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+    debug_print("Initialized messages in session state")
+
+if 'travel_state' not in st.session_state:
+    st.session_state.travel_state = TravelState()
+    debug_print("Initialized travel state in session state")
+
+# Initialize graph with error handling
+if 'graph' not in st.session_state:
+    try:
+        debug_print("Creating travel graph")
+        st.session_state.graph = create_travel_graph()
+        debug_print("Graph created and stored in session state")
+    except Exception as e:
+        error_msg = f"Error creating graph: {str(e)}"
+        debug_print(error_msg)
+        st.error(f"Error initializing the travel assistant: {error_msg}")
+        st.session_state.graph = None
+        st.stop()
+
 if 'selected_flight' not in st.session_state:
     st.session_state.selected_flight = None
+    debug_print("Initialized selected_flight in session state")
+
 if 'selected_accommodation' not in st.session_state:
     st.session_state.selected_accommodation = None
+    debug_print("Initialized selected_accommodation in session state")
 
-# Debug section to show API keys status
-with st.expander("🔍 Debug Information"):
-    st.write("API Keys Status:")
-    st.write({
-        "SERPAPI_API_KEY": "✅ Set" if os.getenv("SERPAPI_API_KEY") else "❌ Not Set",
-        "AIMLAPI_API_KEY": "✅ Set" if os.getenv("AIMLAPI_API_KEY") else "❌ Not Set"
-    })
-    
-    if st.button("Test SerpAPI Connection"):
-        from serpapi import GoogleSearch
-        try:
-            test_params = {
-                "engine": "google_flights",
-                "departure_id": "JFK",
-                "arrival_id": "LAX",
-                "outbound_date": "2025-07-01",
-                "api_key": os.getenv("SERPAPI_API_KEY")
-            }
-            test_search = GoogleSearch(test_params)
-            test_results = test_search.get_dict()
-            st.success("✅ SerpAPI connection successful")
-            st.json(test_results)
-        except Exception as e:
-            st.error(f"❌ SerpAPI connection failed: {str(e)}")
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = {
+        "flights": [],
+        "hotels": [],
+        "destination_info": {}
+    }
+    debug_print("Initialized search_results in session state")
 
+if 'extracted_info' not in st.session_state:
+    st.session_state.extracted_info = {
+        "origin": "",
+        "destination": "",
+        "departure_date": "",
+        "return_date": "",
+        "budget": "",
+        "travelers": 1,
+        "preferences": ""
+    }
+    debug_print("Initialized extracted_info in session state")
+
+if 'chat_stage' not in st.session_state:
+    st.session_state.chat_stage = "initial"
+    debug_print("Initialized chat_stage to 'initial'")
+
+# Function to format datetime for display
+def format_datetime(iso_string):
+    """Format datetime string for display."""
+    debug_print(f"Formatting datetime: {iso_string}")
+    try:
+        # Handle empty or None values
+        if not iso_string:
+            debug_print("Empty datetime string, returning N/A")
+            return "N/A"
+            
+        # Handle numeric timestamps (seconds since epoch)
+        if isinstance(iso_string, (int, float)) or (isinstance(iso_string, str) and iso_string.isdigit()):
+            timestamp = float(iso_string)
+            dt = datetime.fromtimestamp(timestamp)
+            formatted = dt.strftime("%b %d, %Y | %I:%M %p")  # Example: Mar 06, 2025 | 6:20 PM
+            debug_print(f"Formatted timestamp {iso_string} to {formatted}")
+            return formatted
+            
+        # Handle ISO format strings
+        if "T" in iso_string:
+            dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+            formatted = dt.strftime("%b %d, %Y | %I:%M %p")
+            debug_print(f"Formatted ISO datetime {iso_string} to {formatted}")
+            return formatted
+            
+        # Handle simple date strings
+        if "-" in iso_string and len(iso_string) >= 10:
+            dt = datetime.strptime(iso_string[:10], "%Y-%m-%d")
+            formatted = dt.strftime("%b %d, %Y")
+            debug_print(f"Formatted date {iso_string} to {formatted}")
+            return formatted
+            
+        # Handle other datetime formats
+        formats_to_try = [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%H:%M"
+        ]
+        
+        for fmt in formats_to_try:
+            try:
+                dt = datetime.strptime(iso_string, fmt)
+                formatted = dt.strftime("%b %d, %Y | %I:%M %p")
+                debug_print(f"Formatted {iso_string} using format {fmt} to {formatted}")
+                return formatted
+            except:
+                continue
+                
+        debug_print(f"Could not format datetime {iso_string}, returning as is")
+        return iso_string  # Return original if all parsing fails
+    except Exception as e:
+        error_msg = f"Error formatting datetime: {e}"
+        debug_print(error_msg)
+        return str(iso_string)  # Return original if parsing fails
+
+# Function to create PDF itinerary
 def create_pdf_itinerary(flight_data, accommodation_data, activities):
     """Create a PDF itinerary from selected options."""
+    debug_print("Creating PDF itinerary")
     pdf = FPDF()
     pdf.add_page()
     
@@ -141,359 +264,418 @@ def create_pdf_itinerary(flight_data, accommodation_data, activities):
     for activity in activities:
         pdf.cell(0, 8, f'• {activity}', 0, 1)
     
+    debug_print("PDF itinerary created successfully")
     return pdf
 
-def send_email(email_address, pdf_bytes, itinerary_data):
-    """Send itinerary PDF via email (mock implementation)."""
-    try:
-        # In a real implementation, you would:
-        # 1. Configure SMTP server
-        # 2. Create and send the email with attachment
-        # For now, we'll just show a success message
-        return True
-    except Exception as e:
-        st.error(f"Failed to send email: {str(e)}")
-        return False
-
-def create_timeline(departure_date, return_date, activities):
-    """Create a Plotly timeline visualization."""
-    df = []
+# Function to handle user messages and interact with the agent graph
+def handle_user_message(user_input):
+    """Process user message through LangGraph agents."""
+    debug_print(f"Processing user message: {user_input}")
     
-    # Add flight events
-    df.append(dict(Task="Travel", Start=departure_date, Finish=departure_date, Resource="Flight"))
-    df.append(dict(Task="Travel", Start=return_date, Finish=return_date, Resource="Flight"))
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # Add activities
-    current_date = departure_date
-    while current_date <= return_date:
-        for activity in activities:
-            df.append(dict(
-                Task="Activity",
-                Start=current_date,
-                Finish=current_date + timedelta(hours=2),
-                Resource=activity
-            ))
-        current_date += timedelta(days=1)
+    # Check if graph is initialized
+    if st.session_state.graph is None:
+        debug_print("Graph is not initialized")
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": "I'm sorry, but the travel assistant is not properly initialized. Please check the error message or try again later."
+        })
+        return
     
-    # Create the timeline
-    fig = ff.create_gantt(
-        df,
-        colors={
-            'Flight': '#ff6b35',
-            'Activity': '#4b4b4b'
-        },
-        index_col='Resource',
-        show_colorbar=True,
-        group_tasks=True,
-        showgrid_x=True,
-        showgrid_y=True
-    )
-    
-    # Update layout for dark theme
-    fig.update_layout(
-        plot_bgcolor='#2b2b2b',
-        paper_bgcolor='#2b2b2b',
-        font_color='#ffffff'
-    )
-    
-    return fig
-
-def format_datetime(iso_string):
-    """Format datetime string for display."""
-    try:
-        # Handle empty or None values
-        if not iso_string:
-            return "N/A"
-            
-        # Handle numeric timestamps (seconds since epoch)
-        if isinstance(iso_string, (int, float)) or (isinstance(iso_string, str) and iso_string.isdigit()):
-            timestamp = float(iso_string)
-            dt = datetime.fromtimestamp(timestamp)
-            return dt.strftime("%b %d, %Y | %I:%M %p")  # Example: Mar 06, 2025 | 6:20 PM
-            
-        # Handle ISO format strings
-        if "T" in iso_string:
-            dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
-            return dt.strftime("%b %d, %Y | %I:%M %p")
-            
-        # Handle simple date strings
-        if "-" in iso_string and len(iso_string) >= 10:
-            dt = datetime.strptime(iso_string[:10], "%Y-%m-%d")
-            return dt.strftime("%b %d, %Y")
-            
-        # Handle other datetime formats
-        formats_to_try = [
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%d/%m/%Y",
-            "%m/%d/%Y",
-            "%H:%M"
-        ]
-        
-        for fmt in formats_to_try:
-            try:
-                dt = datetime.strptime(iso_string, fmt)
-                return dt.strftime("%b %d, %Y | %I:%M %p")
-            except:
-                continue
-                
-        return iso_string  # Return original if all parsing fails
-    except Exception as e:
-        print(f"Error formatting datetime: {e}")
-        return str(iso_string)  # Return original if parsing fails
-
-# Sidebar form
-with st.sidebar:
-    st.title("✈️ Travel Planner")
-    st.markdown("---")
-    
-    # User inputs
-    prompt = st.text_area("What kind of trip are you dreaming of?",
-                         placeholder="E.g., I want a relaxing beach vacation...")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        origin = st.text_input("Origin", placeholder="City or airport code")
-    with col2:
-        destination = st.text_input("Destination", placeholder="City or airport code")
-    
-    col3, col4 = st.columns(2)
-    with col3:
-        departure_date = st.date_input("Departure")
-    with col4:
-        return_date = st.date_input("Return")
-    
-    travel_mode = st.selectbox(
-        "Mode of Travel",
-        ["flight", "train", "bus", "mixed"]
-    )
-    
-    accommodation_type = st.selectbox(
-        "Accommodation Type",
-        ["hotel", "hostel", "apartment"]
-    )
-    
-    # Auto-calculate length of stay
-    default_stay = (return_date - departure_date).days
-    if default_stay < 0:
-        default_stay = 1
-        st.warning("Return date must be after departure date.")
-    
-    # Set length of stay input based on dates
-    if departure_date and return_date:
-        # Ensure that length_of_stay is at least 1 day
-        length_of_stay = max(default_stay, 1)  # This makes sure length_of_stay is never below 1
-        length_of_stay = st.number_input("Length of Stay (days)", 
-                                        value=length_of_stay, min_value=1)
-
-    if (return_date - departure_date).days <= 0:
-        st.warning("Return date must be after departure date.")
-
-    
-    col5, col6 = st.columns(2)
-    with col5:
-        budget = st.number_input("Budget (INR)", min_value=0, value=5000, step=500)
-    with col6:
-        travelers = st.number_input("Number of Travelers", min_value=1, value=1)
-    
-    search_button = st.button("Search")
-
-# Main content area
-if search_button:
-    if not origin or not destination or not departure_date or not return_date:
-        st.error("Please fill in all required fields: origin, destination, departure date, and return date.")
+    # Initialize or update travel state with the new message
+    if not hasattr(st.session_state.travel_state, 'messages') or not st.session_state.travel_state.messages:
+        st.session_state.travel_state = TravelState(
+            messages=[{"role": "user", "content": user_input}]
+        )
     else:
+        st.session_state.travel_state.messages.append({"role": "user", "content": user_input})
+    
+    # Process through the graph
+    debug_print("Running message through agent graph")
+    try:
+        events = []
+        for event in st.session_state.graph.stream(st.session_state.travel_state):
+            events.append(event)
+            if event.get("type") == "agent":
+                agent_name = event.get("agent", "Assistant")
+                state = event.get("state")
+                if state and state.messages and len(state.messages) > 0:
+                    last_message = state.messages[-1]
+                    if last_message["role"] == "assistant":
+                        st.session_state.messages.append({"role": "assistant", "content": last_message["content"]})
+                        st.session_state.travel_state = state
+                        
+                        # Extract and structure travel information if it looks like a structured request
+                        extract_travel_info(last_message["content"])
+        
+        # If no response was generated, provide a fallback
+        if not any(e.get("type") == "agent" for e in events):
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": "I'm processing your request. Can you please provide more details about your travel plans?"
+            })
+            
+    except Exception as e:
+        error_msg = f"Error in agent processing: {str(e)}"
+        debug_print(error_msg)
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": f"I encountered an error while processing your request. Please try again or provide more specific details. Error: {str(e)}"
+        })
+
+# Function to extract structured travel information from messages
+def extract_travel_info(message):
+    """Extract structured travel information from LLM responses."""
+    debug_print("Extracting travel info from message")
+    
+    # Simple extraction of key travel information
+    info = st.session_state.extracted_info.copy()
+    
+    # Check for origin/departure location
+    if "from " in message.lower():
+        parts = message.lower().split("from ")
+        if len(parts) > 1:
+            next_part = parts[1].split(" ")
+            if len(next_part) > 0:
+                potential_origin = next_part[0].strip().rstrip(",.?!:;")
+                if len(potential_origin) > 1:
+                    info["origin"] = potential_origin.upper()
+                    debug_print(f"Extracted origin: {info['origin']}")
+    
+    # Check for destination
+    if "to " in message.lower():
+        parts = message.lower().split("to ")
+        if len(parts) > 1:
+            next_part = parts[1].split(" ")
+            if len(next_part) > 0:
+                potential_dest = next_part[0].strip().rstrip(",.?!:;")
+                if len(potential_dest) > 1:
+                    info["destination"] = potential_dest.upper()
+                    debug_print(f"Extracted destination: {info['destination']}")
+    
+    # Check for dates
+    import re
+    date_pattern = r'\b\d{4}-\d{2}-\d{2}\b'
+    dates = re.findall(date_pattern, message)
+    if len(dates) >= 2:
+        info["departure_date"] = dates[0]
+        info["return_date"] = dates[1]
+        debug_print(f"Extracted dates: {info['departure_date']} to {info['return_date']}")
+    elif len(dates) == 1:
+        info["departure_date"] = dates[0]
+        debug_print(f"Extracted departure date: {info['departure_date']}")
+    
+    # Check for budget
+    budget_patterns = [
+        r'budget.*?(\d+)',
+        r'(\d+).*?budget',
+        r'around (\d+)',
+        r'about (\d+)'
+    ]
+    
+    for pattern in budget_patterns:
+        budget_match = re.search(pattern, message.lower())
+        if budget_match:
+            info["budget"] = budget_match.group(1)
+            debug_print(f"Extracted budget: {info['budget']}")
+            break
+    
+    # Check for travelers
+    travelers_patterns = [
+        r'(\d+).*?traveler',
+        r'(\d+).*?people',
+        r'(\d+).*?person',
+        r'for (\d+)'
+    ]
+    
+    for pattern in travelers_patterns:
+        travelers_match = re.search(pattern, message.lower())
+        if travelers_match:
+            info["travelers"] = travelers_match.group(1)
+            debug_print(f"Extracted travelers: {info['travelers']}")
+            break
+    
+    # Update session state with extracted info
+    st.session_state.extracted_info = info
+    
+    # If we have enough information, move to the search stage
+    if (info["origin"] and info["destination"] and 
+        info["departure_date"] and info["return_date"]):
+        st.session_state.chat_stage = "ready_to_search"
+        debug_print("Enough information extracted, ready to search")
+
+# Function to search for travel options
+def search_travel_options():
+    """Search for flights and hotels based on extracted information."""
+    debug_print("Searching for travel options")
+    info = st.session_state.extracted_info
+    
+    if not info["origin"] or not info["destination"] or not info["departure_date"] or not info["return_date"]:
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": "I need more information before I can search. Please provide origin, destination, departure date, and return date."
+        })
+        return
+    
+    try:
+        with st.spinner("Searching for the best options..."):
+            # Search for flights
+            debug_print("Starting flight search")
+            flights = search_flights_serp(
+                origin=info["origin"],
+                destination=info["destination"],
+                departure_date=info["departure_date"],
+                return_date=info["return_date"],
+                budget=info["budget"]
+            )
+            st.session_state.search_results["flights"] = flights
+            debug_print(f"Flight search returned {len(flights)} results")
+            
+            # Search for hotels
+            debug_print("Starting hotel search")
+            hotels = search_hotels_serp(
+                location=info["destination"],
+                check_in=info["departure_date"],
+                check_out=info["return_date"],
+                budget=info["budget"]
+            )
+            st.session_state.search_results["hotels"] = hotels
+            debug_print(f"Hotel search returned {len(hotels)} results")
+            
+            # Get destination information
+            debug_print("Starting destination info search")
+            destination_info = get_destination_info_serp(info["destination"])
+            st.session_state.search_results["destination_info"] = destination_info
+            debug_print(f"Destination info received: {bool(destination_info)}")
+        
+        # Update chat stage
+        st.session_state.chat_stage = "results"
+        debug_print("Search completed, showing results")
+        
+        # Generate response message about results
+        flights_msg = f"I found {len(flights)} flight options" if flights else "I couldn't find any flights matching your criteria"
+        hotels_msg = f"and {len(hotels)} hotel options" if hotels else "but couldn't find any hotels matching your criteria"
+        
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": f"I've completed my search! {flights_msg} {hotels_msg}. Please review the options below and let me know if you'd like to make any adjustments."
+        })
+        
+    except Exception as e:
+        error_msg = f"Error searching for travel options: {str(e)}"
+        debug_print(error_msg)
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": f"I encountered an error while searching. Please check your search parameters or try again later. Error: {str(e)}"
+        })
+
+# Debug section to show API keys status
+with st.expander("🔍 Debug Information"):
+    debug_print("Rendering debug section")
+    st.write("API Keys Status:")
+    api_keys_status = {
+        "SERPAPI_API_KEY": "✅ Set" if os.getenv("SERPAPI_API_KEY") else "❌ Not Set",
+        "AIMLAPI_API_KEY": "✅ Set" if os.getenv("AIMLAPI_API_KEY") else "❌ Not Set",
+        "OPENAI_API_KEY": "✅ Set" if os.getenv("OPENAI_API_KEY") else "❌ Not Set"
+    }
+    st.write(api_keys_status)
+    debug_print(f"API Keys Status: {api_keys_status}")
+    
+    st.write("Current Extracted Information:")
+    st.write(st.session_state.extracted_info)
+    
+    st.write("Current Chat Stage:")
+    st.write(st.session_state.chat_stage)
+    
+    if st.button("Test SerpAPI Connection"):
+        debug_print("SerpAPI test button clicked")
+        from serpapi import GoogleSearch
         try:
-            with st.spinner("Searching for the best options..."):
-                # Search for flights
-                flights = search_flights_serp(
-                    origin=origin,
-                    destination=destination,
-                    departure_date=departure_date.strftime("%Y-%m-%d"),
-                    return_date=return_date.strftime("%Y-%m-%d"),
-                    budget=str(budget) if budget else None
-                )
-                
-                # Search for accommodations
-                hotels = search_hotels_serp(
-                    location=destination,
-                    check_in=departure_date.strftime("%Y-%m-%d"),
-                    check_out=return_date.strftime("%Y-%m-%d"),
-                    budget=str(budget) if budget else None
-                )
-                
-                # Get destination information
-                destination_info = get_destination_info_serp(destination)
-            
-            # Display flights section
-            st.header("Flight Options")
-            if flights:
-                flight_cols = st.columns(min(3, len(flights)))
-                for i, flight in enumerate(flights):
-                    with flight_cols[i % 3]:
-                        with st.container():
-                            airline = flight.get('airline', 'Unknown Airline')
-                            price = f"{flight.get('price', 'Unknown')} {flight.get('currency', 'INR')}"
-                            departure = format_datetime(flight.get('departure_time', 'Unknown'))
-                            arrival = format_datetime(flight.get('arrival_time', 'Unknown'))
-                            duration = flight.get('duration', 'Unknown')
-                            
-                            st.markdown(f"""
-                            <div class='travel-card {"selected-card" if st.session_state.selected_flight == i else ""}'>
-                                <h3>{airline}</h3>
-                                <p><strong>Price:</strong> {price}</p>
-                                <p><strong>Departure:</strong> {departure}</p>
-                                <p><strong>Arrival:</strong> {arrival}</p>
-                                <p><strong>Duration:</strong> {duration}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            if st.button(f"Select Flight {i+1}", key=f"flight_{i}"):
-                                st.session_state.selected_flight = i
-            else:
-                st.warning("No flight options found. Please check your search parameters or try a different route.")
-                # Debug information
-                st.write("Debug Info:")
-                st.write(f"Search parameters: {origin}, {destination}, {departure_date.strftime('%Y-%m-%d')}, {return_date.strftime('%Y-%m-%d')}, {budget}")
-                
-                # Show cache content for debugging
-                debug_file = f"cache/debug_flights_{origin}_{destination}_{departure_date.strftime('%Y-%m-%d')}.json"
-                if os.path.exists(debug_file):
-                    with st.expander("View API Debug Information"):
-                        with open(debug_file) as f:
-                            debug_data = json.load(f)
-                            st.write("API Response Keys:", list(debug_data.keys()))
-                            if "flights_results" in debug_data:
-                                st.write("Flight Results Structure:", debug_data["flights_results"].keys())
-            
-            # Display hotels section
-            st.header("Accommodation Options")
-            if hotels:
-                hotel_cols = st.columns(min(3, len(hotels)))
-                for i, hotel in enumerate(hotels):
-                    with hotel_cols[i % 3]:
-                        with st.container():
-                            name = hotel.get('name', 'Unknown')
-                            price = f"{hotel.get('price_per_night', 'Unknown')} {hotel.get('currency', 'INR')}"
-                            rating = hotel.get('rating', 'N/A')
-                            description = hotel.get('description', 'No description available')
-                            amenities = ', '.join(hotel.get('amenities', [])[:3]) if hotel.get('amenities') else 'N/A'
-                            
-                            # Display image if available
-                            if hotel.get('image_url'):
-                                st.image(hotel['image_url'], use_column_width=True)
-                            
-                            st.markdown(f"""
-                            <div class='travel-card {"selected-card" if st.session_state.selected_accommodation == i else ""}'>
-                                <h3>{name}</h3>
-                                <p><strong>Price:</strong> {price} per night</p>
-                                <p><strong>Rating:</strong> {rating} ⭐</p>
-                                <p><strong>Description:</strong> {description[:100]}...</p>
-                                <p><strong>Amenities:</strong> {amenities}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            if st.button(f"Select Hotel {i+1}", key=f"hotel_{i}"):
-                                st.session_state.selected_accommodation = i
-            else:
-                st.warning("No accommodation options found. Please check your search parameters or try a different location.")
-                # Debug information
-                st.write("Debug Info:")
-                st.write(f"Search parameters: {destination}, {departure_date.strftime('%Y-%m-%d')}, {return_date.strftime('%Y-%m-%d')}, {budget}")
-                
-                # Show cache content for debugging
-                debug_file = f"cache/debug_hotels_{destination}_{departure_date.strftime('%Y-%m-%d')}_{return_date.strftime('%Y-%m-%d')}.json"
-                if os.path.exists(debug_file):
-                    with st.expander("View API Debug Information"):
-                        with open(debug_file) as f:
-                            debug_data = json.load(f)
-                            st.write("API Response Keys:", list(debug_data.keys()))
-                            if "properties" in debug_data:
-                                st.write("Hotel Count:", len(debug_data["properties"]))
-                                st.write("First Hotel Example:", debug_data["properties"][0] if debug_data["properties"] else "No hotels")
-            
-            # Display destination information
-            st.header("Destination Information")
-            if destination_info:
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.subheader(destination_info.get('name', destination))
-                    st.write(destination_info.get('description', 'No description available'))
-                    
-                    if destination_info.get('attractions'):
-                        st.subheader("Top Attractions")
-                        for attraction in destination_info.get('attractions'):
-                            st.write(f"• {attraction}")
-                
-                with col2:
-                    if destination_info.get('local_tips'):
-                        st.subheader("Local Tips")
-                        for tip in destination_info.get('local_tips'):
-                            st.write(f"• {tip}")
-            else:
-                st.info(f"No detailed information available for {destination}")
-        
-            # Display timeline if both flight and accommodation are selected
-            if st.session_state.selected_flight is not None and st.session_state.selected_accommodation is not None:
-                st.header("Your Itinerary Timeline")
-                
-                # Create sample activities from destination info
-                activities = destination_info.get('attractions', [])[:5] if destination_info else ["Sightseeing"]
-                
-                # Create and display timeline
-                timeline = create_timeline(departure_date, return_date, activities)
-                st.plotly_chart(timeline, use_container_width=True)
-                
-                # Export options
-                col7, col8 = st.columns(2)
-                with col7:
-                    if st.button("Download PDF"):
-                        selected_flight = flights[st.session_state.selected_flight]
-                        selected_hotel = hotels[st.session_state.selected_accommodation]
-                        
-                        pdf = create_pdf_itinerary(
-                            selected_flight,
-                            selected_hotel,
-                            activities
-                        )
-                        
-                        # Save PDF to memory and create download button
-                        pdf_output = pdf.output(dest='S').encode('latin-1')
-                        st.download_button(
-                            label="Download Itinerary PDF",
-                            data=pdf_output,
-                            file_name="travel_itinerary.pdf",
-                            mime="application/pdf"
-                        )
-                
-                with col8:
-                    email = st.text_input("Email address for itinerary")
-                    if email and st.button("Email Itinerary"):
-                        selected_flight = flights[st.session_state.selected_flight]
-                        selected_hotel = hotels[st.session_state.selected_accommodation]
-                        
-                        pdf = create_pdf_itinerary(
-                            selected_flight,
-                            selected_hotel,
-                            activities
-                        )
-                        
-                        if send_email(email, pdf.output(dest='S').encode('latin-1'), {
-                            'flight': selected_flight,
-                            'hotel': selected_hotel,
-                            'activities': activities
-                        }):
-                            st.success("Itinerary sent successfully!")
-        
+            test_params = {
+                "engine": "google_flights",
+                "departure_id": "JFK",
+                "arrival_id": "LAX",
+                "outbound_date": "2025-07-01",
+                "api_key": os.getenv("SERPAPI_API_KEY")
+            }
+            debug_print(f"Testing SerpAPI with params: {test_params}")
+            test_search = GoogleSearch(test_params)
+            test_results = test_search.get_dict()
+            st.success("✅ SerpAPI connection successful")
+            st.json(test_results)
+            debug_print("SerpAPI test successful")
         except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-            st.info("Check the debug section to make sure your API keys are properly set up.")
+            error_msg = f"❌ SerpAPI connection failed: {str(e)}"
+            st.error(error_msg)
+            debug_print(f"SerpAPI test failed: {error_msg}")
+
+# Layout the app with a chat interface
+st.title("✈️ AI Travel Planner")
+st.markdown("Chat with our AI to plan your perfect trip. Just tell us what you're looking for!")
+
+# Display chat messages
+st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+for message in st.session_state.messages:
+    if message["role"] == "user":
+        st.markdown(f'<div class="user-message">{message["content"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="ai-message">{message["content"]}</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Chat input and search button
+col1, col2 = st.columns([5, 1])
+with col1:
+    user_input = st.text_input("", placeholder="Tell me about your travel plans...", key="user_input")
+with col2:
+    if st.session_state.chat_stage == "ready_to_search":
+        search_button = st.button("Search Now")
+    else:
+        search_button = False
+
+# Process user input
+if user_input:
+    handle_user_message(user_input)
+    # Clear the input box
+    st.session_state.user_input = ""
+    
+# Process search button
+if search_button:
+    search_travel_options()
+
+# Display results if available
+if st.session_state.chat_stage == "results" and st.session_state.search_results:
+    results = st.session_state.search_results
+    
+    # Display flights section
+    if results["flights"]:
+        st.header("Flight Options")
+        debug_print(f"Displaying {len(results['flights'])} flight options")
+        flight_cols = st.columns(min(3, len(results["flights"])))
+        for i, flight in enumerate(results["flights"]):
+            with flight_cols[i % 3]:
+                with st.container():
+                    airline = flight.get('airline', 'Unknown Airline')
+                    price = f"{flight.get('price', 'Unknown')} {flight.get('currency', 'INR')}"
+                    departure = format_datetime(flight.get('departure_time', 'Unknown'))
+                    arrival = format_datetime(flight.get('arrival_time', 'Unknown'))
+                    duration = flight.get('duration', 'Unknown')
+                    debug_print(f"Flight {i+1}: {airline}, Price: {price}")
+                    
+                    st.markdown(f"""
+                    <div class='travel-card {"selected-card" if st.session_state.selected_flight == i else ""}'>
+                        <h3>{airline}</h3>
+                        <p><strong>Price:</strong> {price}</p>
+                        <p><strong>Departure:</strong> {departure}</p>
+                        <p><strong>Arrival:</strong> {arrival}</p>
+                        <p><strong>Duration:</strong> {duration}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button(f"Select Flight {i+1}", key=f"flight_{i}"):
+                        debug_print(f"User selected flight {i+1}")
+                        st.session_state.selected_flight = i
+    
+    # Display hotels section
+    if results["hotels"]:
+        st.header("Accommodation Options")
+        debug_print(f"Displaying {len(results['hotels'])} hotel options")
+        hotel_cols = st.columns(min(3, len(results["hotels"])))
+        for i, hotel in enumerate(results["hotels"]):
+            with hotel_cols[i % 3]:
+                with st.container():
+                    name = hotel.get('name', 'Unknown')
+                    price = f"{hotel.get('price_per_night', 'Unknown')} {hotel.get('currency', 'INR')}"
+                    rating = hotel.get('rating', 'N/A')
+                    description = hotel.get('description', 'No description available')
+                    amenities = ', '.join(hotel.get('amenities', [])[:3]) if hotel.get('amenities') else 'N/A'
+                    debug_print(f"Hotel {i+1}: {name}, Price: {price}, Rating: {rating}")
+                    
+                    # Display image if available
+                    if hotel.get('image_url'):
+                        debug_print(f"Hotel {i+1} has image URL: {hotel['image_url'][:50]}...")
+                        st.image(hotel['image_url'], use_container_width=True)
+                    
+                    st.markdown(f"""
+                    <div class='travel-card {"selected-card" if st.session_state.selected_accommodation == i else ""}'>
+                        <h3>{name}</h3>
+                        <p><strong>Price:</strong> {price} per night</p>
+                        <p><strong>Rating:</strong> {rating} ⭐</p>
+                        <p><strong>Description:</strong> {description[:100]}...</p>
+                        <p><strong>Amenities:</strong> {amenities}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button(f"Select Hotel {i+1}", key=f"hotel_{i}"):
+                        debug_print(f"User selected hotel {i+1}")
+                        st.session_state.selected_accommodation = i
+    
+    # Display destination information
+    destination_info = results["destination_info"]
+    if destination_info:
+        st.header("Destination Information")
+        debug_print(f"Displaying destination info for {destination_info.get('name', st.session_state.extracted_info.get('destination', 'Unknown'))}")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.subheader(destination_info.get('name', st.session_state.extracted_info.get('destination', 'Unknown')))
+            st.write(destination_info.get('description', 'No description available'))
+            
+            if destination_info.get('attractions'):
+                st.subheader("Top Attractions")
+                for attraction in destination_info.get('attractions'):
+                    st.write(f"• {attraction}")
+                debug_print(f"Listed {len(destination_info.get('attractions', []))} attractions")
+        
+        with col2:
+            if destination_info.get('local_tips'):
+                st.subheader("Local Tips")
+                for tip in destination_info.get('local_tips'):
+                    st.write(f"• {tip}")
+                debug_print(f"Listed {len(destination_info.get('local_tips', []))} local tips")
+
+    # Display itinerary if flight and hotel are selected
+    if st.session_state.selected_flight is not None and st.session_state.selected_accommodation is not None:
+        debug_print("Both flight and hotel selected, showing itinerary options")
+        st.header("Your Itinerary")
+        
+        # Create sample activities from destination info
+        activities = destination_info.get('attractions', [])[:5] if destination_info else ["Sightseeing"]
+        
+        col7, col8 = st.columns(2)
+        with col7:
+            if st.button("Download PDF"):
+                debug_print("PDF download button clicked")
+                selected_flight = results["flights"][st.session_state.selected_flight]
+                selected_hotel = results["hotels"][st.session_state.selected_accommodation]
+                
+                pdf = create_pdf_itinerary(
+                    selected_flight,
+                    selected_hotel,
+                    activities
+                )
+                
+                # Save PDF to memory and create download button
+                pdf_output = pdf.output(dest='S').encode('latin-1')
+                st.download_button(
+                    label="Download Itinerary PDF",
+                    data=pdf_output,
+                    file_name="travel_itinerary.pdf",
+                    mime="application/pdf"
+                )
+        
+        with col8:
+            email = st.text_input("Email address for itinerary")
+            send_email = st.button("Email Itinerary")
+            if email and send_email:
+                st.success("Your itinerary has been sent to your email!")
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666666;'>
-        <p>Travel Planner v1.0 | Built with ❤️ using Streamlit</p>
+        <p>AI Travel Planner v2.0 | Built with ❤️ using Streamlit, LangGraph, and OpenAI</p>
     </div>
     """,
     unsafe_allow_html=True
-) 
+)
+debug_print("App rendering complete") 
