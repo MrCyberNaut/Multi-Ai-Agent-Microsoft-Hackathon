@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
 import streamlit as st
 import sys
+import time
 
 # Load environment variables
 load_dotenv()
@@ -138,82 +139,70 @@ def search_flights_serp(origin: str, destination: str, departure_date: str, retu
     
     cached = _get_cached_results(query_hash)
     if cached:
-        return cached
+        return cached["results"]
     
     # Updated parameters based on SerpAPI documentation
     params = {
         "engine": "google_flights",
         "departure_id": origin.upper(),  # Ensure uppercase IATA code
         "arrival_id": destination.upper(),  # Ensure uppercase IATA code
-        "outbound_date": departure_date,  # Use outbound_date instead of date
+        "outbound_date": departure_date,
+        "return_date": return_date,
+        "currency": "INR",  # Default to INR
         "hl": "en",
-        "gl": "us",
-        "currency": "USD",
+        "gl": "in",
+        "type": "1",  # 1 = Round trip, 2 = One way
         "api_key": SERPAPI_API_KEY
     }
     
-    # Add return date for round trips
-    if return_date:
-        params["return_date"] = return_date
-        params["type"] = "2"  # Round trip
-    
-    # Add budget as max_price if provided
+    # Default budget is 5000 INR per person if not specified
     if budget:
-        try:
-            # Convert to numeric value without $
-            budget_value = float(budget.replace('$', '').strip())
-            params["max_price"] = budget_value
-        except:
-            pass
+        budget_value = budget if isinstance(budget, int) else int(''.join(filter(str.isdigit, str(budget))) or 5000)
+    else:
+        budget_value = 5000
+    
+    print(f"Searching flights with params: {params}")
     
     try:
-        st.write("Searching for flights...") if 'st' in globals() else print("Searching for flights...")
+        # Use GoogleSearch instead of SerpApiClient
         search = GoogleSearch(params)
-        results = search.get_dict()
+        response = search.get_dict()
         
-        flights = []
-        # Check for API error response
-        if "error" in results:
-            print(f"SerpAPI error: {results['error']}")
-            _cache_results(query_hash, [])
-            return []
+        # Save full response for debugging
+        debug_query_hash = f"debug_{query_hash}"
+        _cache_results(debug_query_hash, response)
+        
+        # Extract and process flight data
+        flight_results = []
+        
+        if "flights_results" in response and "flights" in response["flights_results"]:
+            flights = response["flights_results"]["flights"]
             
-        if "best_flights" in results:
-            # Extract flight details from best_flights
-            for flight in results.get("best_flights", []):
-                flight_info = {
-                    "airline": flight.get('airline', 'Unknown'),
-                    "flight_number": flight.get('flight_id', 'Unknown'),
-                    "price": flight.get('price', 'Unknown'),
-                    "duration": flight.get('total_duration', 'Unknown'),
-                    "stops": flight.get('layovers', [])
-                }
-                
-                # Extract departure and arrival details
-                flights_details = flight.get('flights', [])
-                if flights_details:
-                    first_flight = flights_details[0]
-                    last_flight = flights_details[-1]
-                    
-                    departure_airport = first_flight.get('departure_airport', {})
-                    arrival_airport = last_flight.get('arrival_airport', {})
-                    
-                    flight_info["departure"] = departure_airport.get('time', 'Unknown')
-                    flight_info["arrival"] = arrival_airport.get('time', 'Unknown')
-                
-                flights.append(flight_info)
+            for flight in flights:
+                # Check if flight is within budget
+                price = flight.get("price", {}).get("total", {}).get("amount", 0)
+                if price and price <= budget_value:
+                    flight_results.append({
+                        "airline": flight.get("airlines", [{}])[0].get("name", "Unknown Airline"),
+                        "departure_time": flight.get("departure", {}).get("datetime", {}).get("timestamp", ""),
+                        "arrival_time": flight.get("arrival", {}).get("datetime", {}).get("timestamp", ""),
+                        "duration": flight.get("duration", {}).get("text", ""),
+                        "price": price,
+                        "currency": "INR",
+                        "link": flight.get("booking_token", "")
+                    })
         
-        # For debugging - save full response if no flights found
-        if not flights:
-            with open(f"cache/debug_{query_hash}.json", "w") as f:
-                json.dump(results, f)
-                
-        _cache_results(query_hash, flights)
-        return flights
+        # Cache the processed results
+        results = {"timestamp": time.time(), "results": flight_results}
+        _cache_results(query_hash, results)
         
+        print(f"Flight search results count: {len(flight_results)}")
+        return flight_results
+    
     except Exception as e:
-        print(f"Error in SerpAPI flight search: {str(e)}")
-        _cache_results(query_hash, [])
+        error_msg = f"Error searching flights: {str(e)}"
+        print(error_msg)
+        # Return empty list on error
         return []
 
 def search_hotels_serp(location: str, check_in: str, check_out: str, budget: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -225,65 +214,81 @@ def search_hotels_serp(location: str, check_in: str, check_out: str, budget: Opt
     
     cached = _get_cached_results(query_hash)
     if cached:
-        return cached
+        return cached["results"]
     
     # Updated parameters based on SerpAPI documentation
     params = {
         "engine": "google_hotels",
-        "q": f"hotels in {location}",  # Search query
-        "location": location,
+        "q": f"hotels in {location}",
         "check_in_date": check_in,
         "check_out_date": check_out,
+        "currency": "INR",  # Default to INR
+        "adults": 2,  # Default number of adults
+        "children": 0,
         "hl": "en",
-        "gl": "us",
-        "currency": "USD",
+        "gl": "in",
         "api_key": SERPAPI_API_KEY
     }
     
-    # Add budget as price constraint if provided
+    # Default budget is 5000 INR per night if not specified
     if budget:
-        try:
-            budget_value = float(budget.replace('$', '').strip())
-            params["price_max"] = budget_value
-        except:
-            pass
+        budget_value = budget if isinstance(budget, int) else int(''.join(filter(str.isdigit, str(budget))) or 5000)
+    else:
+        budget_value = 5000
+    
+    print(f"Searching hotels with params: {params}")
     
     try:
-        st.write("Searching for hotels...") if 'st' in globals() else print("Searching for hotels...")
+        # Use GoogleSearch instead of SerpApiClient
         search = GoogleSearch(params)
-        results = search.get_dict()
+        response = search.get_dict()
         
-        hotels = []
-        # Check for API error response
-        if "error" in results:
-            print(f"SerpAPI error: {results['error']}")
-            _cache_results(query_hash, [])
-            return []
+        # Save full response for debugging
+        debug_query_hash = f"debug_{query_hash}"
+        _cache_results(debug_query_hash, response)
+        
+        # Extract and process hotel data
+        hotel_results = []
+        
+        if "properties" in response:
+            hotels = response["properties"]
             
-        if "hotels_results" in results:
-            for hotel in results["hotels_results"]:
-                hotel_info = {
-                    "name": hotel.get('name', 'Unknown'),
-                    "price": hotel.get('price', 'Unknown'),
-                    "rating": hotel.get('rating', 0),
-                    "amenities": hotel.get('amenities', []),
-                    "address": hotel.get('address', 'Unknown'),
-                    "website": hotel.get('website', 'Unknown'),
-                    "reviews": hotel.get('reviews', [])
-                }
-                hotels.append(hotel_info)
-        
-        # For debugging - save full response if no hotels found
-        if not hotels:
-            with open(f"cache/debug_{query_hash}.json", "w") as f:
-                json.dump(results, f)
+            for hotel in hotels:
+                # Check if hotel is a vacation rental
+                if hotel.get("type") != "hotel":
+                    continue
                 
-        _cache_results(query_hash, hotels)
-        return hotels
+                # Get the nightly rate or total rate
+                price = 0
+                if "rate_per_night" in hotel and "extracted_lowest" in hotel["rate_per_night"]:
+                    price = hotel["rate_per_night"]["extracted_lowest"]
+                elif "total_rate" in hotel and "extracted_lowest" in hotel["total_rate"]:
+                    price = hotel["total_rate"]["extracted_lowest"]
+                
+                # Skip hotels outside budget
+                if price and price <= budget_value:
+                    hotel_results.append({
+                        "name": hotel.get("name", "Unknown Hotel"),
+                        "description": hotel.get("description", ""),
+                        "address": "",  # Address not directly available in response
+                        "price_per_night": price,
+                        "currency": "INR",
+                        "rating": hotel.get("overall_rating", 0),
+                        "amenities": hotel.get("amenities", []),
+                        "image_url": hotel.get("images", [{}])[0].get("original_image", "") if hotel.get("images") else "",
+                    })
         
+        # Cache the processed results
+        results = {"timestamp": time.time(), "results": hotel_results}
+        _cache_results(query_hash, results)
+        
+        print(f"Hotel search results count: {len(hotel_results)}")
+        return hotel_results
+    
     except Exception as e:
-        print(f"Error in SerpAPI hotel search: {str(e)}")
-        _cache_results(query_hash, [])
+        error_msg = f"Error searching hotels: {str(e)}"
+        print(error_msg)
+        # Return empty list on error
         return []
 
 def get_destination_info_serp(destination: str) -> Dict[str, Any]:

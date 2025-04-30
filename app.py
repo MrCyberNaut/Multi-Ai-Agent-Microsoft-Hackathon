@@ -201,14 +201,46 @@ def create_timeline(departure_date, return_date, activities):
 def format_datetime(iso_string):
     """Format datetime string for display."""
     try:
-        # Handle different datetime formats
+        # Handle empty or None values
+        if not iso_string:
+            return "N/A"
+            
+        # Handle numeric timestamps (seconds since epoch)
+        if isinstance(iso_string, (int, float)) or (isinstance(iso_string, str) and iso_string.isdigit()):
+            timestamp = float(iso_string)
+            dt = datetime.fromtimestamp(timestamp)
+            return dt.strftime("%b %d, %Y | %I:%M %p")  # Example: Mar 06, 2025 | 6:20 PM
+            
+        # Handle ISO format strings
         if "T" in iso_string:
             dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
-        else:
-            dt = datetime.strptime(iso_string, "%Y-%m-%d %H:%M")
-        return dt.strftime("%b %d, %Y | %I:%M %p")  # Example: Mar 06, 2025 | 6:20 PM
+            return dt.strftime("%b %d, %Y | %I:%M %p")
+            
+        # Handle simple date strings
+        if "-" in iso_string and len(iso_string) >= 10:
+            dt = datetime.strptime(iso_string[:10], "%Y-%m-%d")
+            return dt.strftime("%b %d, %Y")
+            
+        # Handle other datetime formats
+        formats_to_try = [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%H:%M"
+        ]
+        
+        for fmt in formats_to_try:
+            try:
+                dt = datetime.strptime(iso_string, fmt)
+                return dt.strftime("%b %d, %Y | %I:%M %p")
+            except:
+                continue
+                
+        return iso_string  # Return original if all parsing fails
     except Exception as e:
-        return iso_string  # Return original if parsing fails
+        print(f"Error formatting datetime: {e}")
+        return str(iso_string)  # Return original if parsing fails
 
 # Sidebar form
 with st.sidebar:
@@ -260,7 +292,7 @@ with st.sidebar:
     
     col5, col6 = st.columns(2)
     with col5:
-        budget = st.number_input("Budget ($)", min_value=0, step=100)
+        budget = st.number_input("Budget (INR)", min_value=0, value=5000, step=500)
     with col6:
         travelers = st.number_input("Number of Travelers", min_value=1, value=1)
     
@@ -301,9 +333,9 @@ if search_button:
                     with flight_cols[i % 3]:
                         with st.container():
                             airline = flight.get('airline', 'Unknown Airline')
-                            price = flight.get('price', 'Unknown')
-                            departure = format_datetime(flight.get('departure', 'Unknown'))
-                            arrival = format_datetime(flight.get('arrival', 'Unknown'))
+                            price = f"{flight.get('price', 'Unknown')} {flight.get('currency', 'INR')}"
+                            departure = format_datetime(flight.get('departure_time', 'Unknown'))
+                            arrival = format_datetime(flight.get('arrival_time', 'Unknown'))
                             duration = flight.get('duration', 'Unknown')
                             
                             st.markdown(f"""
@@ -319,11 +351,19 @@ if search_button:
                                 st.session_state.selected_flight = i
             else:
                 st.warning("No flight options found. Please check your search parameters or try a different route.")
+                # Debug information
+                st.write("Debug Info:")
+                st.write(f"Search parameters: {origin}, {destination}, {departure_date.strftime('%Y-%m-%d')}, {return_date.strftime('%Y-%m-%d')}, {budget}")
+                
                 # Show cache content for debugging
-                if os.path.exists(f"cache/debug_flights_{origin}_{destination}_{departure_date.strftime('%Y-%m-%d')}.json"):
+                debug_file = f"cache/debug_flights_{origin}_{destination}_{departure_date.strftime('%Y-%m-%d')}.json"
+                if os.path.exists(debug_file):
                     with st.expander("View API Debug Information"):
-                        with open(f"cache/debug_flights_{origin}_{destination}_{departure_date.strftime('%Y-%m-%d')}.json") as f:
-                            st.json(json.load(f))
+                        with open(debug_file) as f:
+                            debug_data = json.load(f)
+                            st.write("API Response Keys:", list(debug_data.keys()))
+                            if "flights_results" in debug_data:
+                                st.write("Flight Results Structure:", debug_data["flights_results"].keys())
             
             # Display hotels section
             st.header("Accommodation Options")
@@ -333,17 +373,21 @@ if search_button:
                     with hotel_cols[i % 3]:
                         with st.container():
                             name = hotel.get('name', 'Unknown')
-                            price = hotel.get('price', 'Unknown')
+                            price = f"{hotel.get('price_per_night', 'Unknown')} {hotel.get('currency', 'INR')}"
                             rating = hotel.get('rating', 'N/A')
-                            address = hotel.get('address', 'Unknown')
+                            description = hotel.get('description', 'No description available')
                             amenities = ', '.join(hotel.get('amenities', [])[:3]) if hotel.get('amenities') else 'N/A'
+                            
+                            # Display image if available
+                            if hotel.get('image_url'):
+                                st.image(hotel['image_url'], use_column_width=True)
                             
                             st.markdown(f"""
                             <div class='travel-card {"selected-card" if st.session_state.selected_accommodation == i else ""}'>
                                 <h3>{name}</h3>
-                                <p><strong>Price:</strong> {price}</p>
+                                <p><strong>Price:</strong> {price} per night</p>
                                 <p><strong>Rating:</strong> {rating} ⭐</p>
-                                <p><strong>Address:</strong> {address}</p>
+                                <p><strong>Description:</strong> {description[:100]}...</p>
                                 <p><strong>Amenities:</strong> {amenities}</p>
                             </div>
                             """, unsafe_allow_html=True)
@@ -351,11 +395,20 @@ if search_button:
                                 st.session_state.selected_accommodation = i
             else:
                 st.warning("No accommodation options found. Please check your search parameters or try a different location.")
+                # Debug information
+                st.write("Debug Info:")
+                st.write(f"Search parameters: {destination}, {departure_date.strftime('%Y-%m-%d')}, {return_date.strftime('%Y-%m-%d')}, {budget}")
+                
                 # Show cache content for debugging
-                if os.path.exists(f"cache/debug_hotels_{destination}_{departure_date.strftime('%Y-%m-%d')}_{return_date.strftime('%Y-%m-%d')}.json"):
+                debug_file = f"cache/debug_hotels_{destination}_{departure_date.strftime('%Y-%m-%d')}_{return_date.strftime('%Y-%m-%d')}.json"
+                if os.path.exists(debug_file):
                     with st.expander("View API Debug Information"):
-                        with open(f"cache/debug_hotels_{destination}_{departure_date.strftime('%Y-%m-%d')}_{return_date.strftime('%Y-%m-%d')}.json") as f:
-                            st.json(json.load(f))
+                        with open(debug_file) as f:
+                            debug_data = json.load(f)
+                            st.write("API Response Keys:", list(debug_data.keys()))
+                            if "properties" in debug_data:
+                                st.write("Hotel Count:", len(debug_data["properties"]))
+                                st.write("First Hotel Example:", debug_data["properties"][0] if debug_data["properties"] else "No hotels")
             
             # Display destination information
             st.header("Destination Information")
