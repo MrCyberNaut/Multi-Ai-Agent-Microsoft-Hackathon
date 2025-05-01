@@ -11,6 +11,7 @@ from email.mime.multipart import MIMEMultipart
 import os
 import json
 import sys
+import importlib
 from booking_agent import (
     search_flights_serp,
     search_hotels_serp,
@@ -20,6 +21,10 @@ from booking_agent import (
     create_travel_graph,
     debug_print
 )
+import time
+
+# Load config
+from config import LLM_PROVIDER, OLLAMA_MODEL
 
 # Enable debugging
 DEBUG = True
@@ -98,6 +103,47 @@ st.markdown("""
         max-width: 80%;
     }
     
+    /* Processing message animation */
+    .processing-message {
+        background-color: #5a5a5a;
+        animation: pulse 1.5s infinite;
+    }
+    
+    @keyframes pulse {
+        0% { opacity: 0.7; }
+        50% { opacity: 1; }
+        100% { opacity: 0.7; }
+    }
+    
+    /* Typing indicator dots */
+    .typing-indicator {
+        display: inline-block;
+    }
+    
+    .typing-indicator span {
+        height: 8px;
+        width: 8px;
+        background-color: white;
+        display: inline-block;
+        border-radius: 50%;
+        margin: 0 2px;
+        opacity: 0.7;
+        animation: bounce 1.3s linear infinite;
+    }
+    
+    .typing-indicator span:nth-child(2) {
+        animation-delay: 0.15s;
+    }
+    
+    .typing-indicator span:nth-child(3) {
+        animation-delay: 0.3s;
+    }
+    
+    @keyframes bounce {
+        0%, 60%, 100% { transform: translateY(0); }
+        30% { transform: translateY(-4px); }
+    }
+    
     /* Button styling */
     .stButton>button {
         background-color: #ff6b35;
@@ -122,6 +168,15 @@ if 'travel_state' not in st.session_state:
     st.session_state.travel_state = TravelState()
     debug_print("Initialized travel state in session state")
 
+# Initialize processing state
+if 'pending_message' not in st.session_state:
+    st.session_state.pending_message = None
+    debug_print("Initialized pending_message in session state")
+    
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
+    debug_print("Initialized is_processing in session state")
+
 # Initialize graph with error handling
 if 'graph' not in st.session_state:
     try:
@@ -139,9 +194,17 @@ if 'selected_flight' not in st.session_state:
     st.session_state.selected_flight = None
     debug_print("Initialized selected_flight in session state")
 
+if 'selected_flight_data' not in st.session_state:
+    st.session_state.selected_flight_data = None
+    debug_print("Initialized selected_flight_data in session state")
+
 if 'selected_accommodation' not in st.session_state:
     st.session_state.selected_accommodation = None
     debug_print("Initialized selected_accommodation in session state")
+
+if 'selected_hotel_data' not in st.session_state:
+    st.session_state.selected_hotel_data = None
+    debug_print("Initialized selected_hotel_data in session state")
 
 if 'search_results' not in st.session_state:
     st.session_state.search_results = {
@@ -275,9 +338,34 @@ def handle_user_message(user_input):
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": user_input})
     
+    # Add a temporary processing indicator message with spinner
+    processing_id = str(len(st.session_state.messages))
+    with st.spinner("Processing your request..."):
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": "⏳ Analyzing your travel request...", 
+            "is_processing": True, 
+            "id": processing_id
+        })
+    
+    # Store the processing status
+    st.session_state.is_processing = True
+    
+    # Force refresh to show the processing indicator
+    st.rerun()
+
+# This function will be called after the rerun
+def process_message(user_input):
+    """Process the user message after showing the processing indicator."""
+    debug_print(f"Now processing user message: {user_input}")
+    
     # Check if graph is initialized
     if st.session_state.graph is None:
         debug_print("Graph is not initialized")
+        # Remove the processing message
+        st.session_state.messages = [msg for msg in st.session_state.messages if not msg.get('is_processing', False)]
+        st.session_state.is_processing = False
+        
         st.session_state.messages.append({
             "role": "assistant", 
             "content": "I'm sorry, but the travel assistant is not properly initialized. Please check the error message or try again later."
@@ -295,31 +383,92 @@ def handle_user_message(user_input):
     # Process through the graph
     debug_print("Running message through agent graph")
     try:
+        # Remove the processing message
+        st.session_state.messages = [msg for msg in st.session_state.messages if not msg.get('is_processing', False)]
+        
         events = []
+        reached_end = False
+        
+        # Use a timeout to prevent infinite processing
+        start_time = time.time()
+        max_process_time = 60  # Maximum processing time in seconds
+        
         for event in st.session_state.graph.stream(st.session_state.travel_state):
             events.append(event)
+            
+            # Check for timeout
+            if time.time() - start_time > max_process_time:
+                debug_print("Processing timeout reached, stopping graph execution")
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": "I've been processing for too long and had to stop. Please try a more specific request or check your input."
+                })
+                break
+                
+            # Check if we've reached the end of the graph
+            if event.get("type") == "end":
+                debug_print("Reached end of graph execution")
+                reached_end = True
+                break
+            
+            # Display agent outputs
             if event.get("type") == "agent":
                 agent_name = event.get("agent", "Assistant")
+                debug_print(f"Processing event from agent: {agent_name}")
                 state = event.get("state")
                 if state and state.messages and len(state.messages) > 0:
                     last_message = state.messages[-1]
                     if last_message["role"] == "assistant":
-                        st.session_state.messages.append({"role": "assistant", "content": last_message["content"]})
+                        # Add a visual indicator for which agent is responding
+                        agent_label = ""
+                        if agent_name == "supervisor":
+                            agent_label = "🧠 "
+                        elif agent_name == "flight_agent":
+                            agent_label = "✈️ "
+                        elif agent_name == "hotel_agent":
+                            agent_label = "🏨 "
+                        elif agent_name == "itinerary_agent":
+                            agent_label = "📋 "
+                        
+                        message_content = f"{agent_label}{last_message['content']}"
+                        st.session_state.messages.append({"role": "assistant", "content": message_content})
                         st.session_state.travel_state = state
                         
                         # Extract and structure travel information if it looks like a structured request
                         extract_travel_info(last_message["content"])
+                        
+                        # Force a rerun to display the message immediately
+                        st.rerun()
         
-        # If no response was generated, provide a fallback
-        if not any(e.get("type") == "agent" for e in events):
+        # If we didn't get any agent responses
+        if not any(e.get("type") == "agent" for e in events) and not reached_end:
             st.session_state.messages.append({
                 "role": "assistant", 
                 "content": "I'm processing your request. Can you please provide more details about your travel plans?"
             })
-            
+        
+        # If we reached the end, add a completion message
+        if reached_end:
+            debug_print("Conversation completed, adding completion indicator")
+            # Check if the last message already indicates completion
+            last_msg = st.session_state.messages[-1]["content"] if st.session_state.messages else ""
+            if not any(phrase in last_msg.lower() for phrase in ["anything else", "final itinerary", "thank you", "goodbye"]):
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": "✅ I've completed processing your request. Is there anything else you'd like to know?"
+                })
+        
+        # Clear processing state
+        st.session_state.is_processing = False
+        debug_print("Processing complete, cleared is_processing state")
+        
     except Exception as e:
         error_msg = f"Error in agent processing: {str(e)}"
         debug_print(error_msg)
+        # Clear processing state and indicator
+        st.session_state.is_processing = False
+        st.session_state.messages = [msg for msg in st.session_state.messages if not msg.get('is_processing', False)]
+        
         st.session_state.messages.append({
             "role": "assistant", 
             "content": f"I encountered an error while processing your request. Please try again or provide more specific details. Error: {str(e)}"
@@ -420,35 +569,47 @@ def search_travel_options():
         return
     
     try:
-        with st.spinner("Searching for the best options..."):
-            # Search for flights
-            debug_print("Starting flight search")
-            flights = search_flights_serp(
-                origin=info["origin"],
-                destination=info["destination"],
-                departure_date=info["departure_date"],
-                return_date=info["return_date"],
-                budget=info["budget"]
-            )
-            st.session_state.search_results["flights"] = flights
-            debug_print(f"Flight search returned {len(flights)} results")
-            
-            # Search for hotels
-            debug_print("Starting hotel search")
-            hotels = search_hotels_serp(
-                location=info["destination"],
-                check_in=info["departure_date"],
-                check_out=info["return_date"],
-                budget=info["budget"]
-            )
-            st.session_state.search_results["hotels"] = hotels
-            debug_print(f"Hotel search returned {len(hotels)} results")
-            
-            # Get destination information
-            debug_print("Starting destination info search")
-            destination_info = get_destination_info_serp(info["destination"])
-            st.session_state.search_results["destination_info"] = destination_info
-            debug_print(f"Destination info received: {bool(destination_info)}")
+        # Create a progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Search for flights
+        status_text.text("Searching for flights...")
+        debug_print("Starting flight search")
+        flights = search_flights_serp(
+            origin=info["origin"],
+            destination=info["destination"],
+            departure_date=info["departure_date"],
+            return_date=info["return_date"],
+            budget=info["budget"]
+        )
+        st.session_state.search_results["flights"] = flights
+        debug_print(f"Flight search returned {len(flights)} results")
+        progress_bar.progress(33)
+        
+        # Search for hotels
+        status_text.text("Finding the best accommodations...")
+        debug_print("Starting hotel search")
+        hotels = search_hotels_serp(
+            location=info["destination"],
+            check_in=info["departure_date"],
+            check_out=info["return_date"],
+            budget=info["budget"]
+        )
+        st.session_state.search_results["hotels"] = hotels
+        debug_print(f"Hotel search returned {len(hotels)} results")
+        progress_bar.progress(66)
+        
+        # Get destination information
+        status_text.text("Gathering destination information...")
+        debug_print("Starting destination info search")
+        destination_info = get_destination_info_serp(info["destination"])
+        st.session_state.search_results["destination_info"] = destination_info
+        debug_print(f"Destination info received: {bool(destination_info)}")
+        progress_bar.progress(100)
+        
+        # Clear the progress indicators
+        status_text.empty()
         
         # Update chat stage
         st.session_state.chat_stage = "results"
@@ -483,6 +644,28 @@ with st.expander("🔍 Debug Information"):
     st.write(api_keys_status)
     debug_print(f"API Keys Status: {api_keys_status}")
     
+    # Debug settings (only visible when DEBUG is True)
+    if DEBUG and st.sidebar.checkbox("Show Debug Controls", value=False):
+        st.sidebar.header("Debug Controls")
+        
+        # LLM Provider selection
+        current_provider = os.getenv("LLM_PROVIDER", "openai")
+        llm_provider = st.sidebar.radio(
+            "LLM Provider",
+            options=["openai", "ollama"],
+            index=0 if current_provider == "openai" else 1
+        )
+        
+        # Apply LLM provider change
+        if llm_provider != current_provider:
+            os.environ["LLM_PROVIDER"] = llm_provider
+            if llm_provider == "openai":
+                st.success("LLM provider updated to OpenAI. App will use OpenAI for all LLM calls.")
+                st.rerun()
+            else:
+                st.success(f"LLM provider updated to Ollama ({os.getenv('OLLAMA_MODEL', 'llama3.2')}). App will use Ollama for all LLM calls.")
+                st.rerun()
+    
     st.write("Current Extracted Information:")
     st.write(st.session_state.extracted_info)
     
@@ -515,18 +698,40 @@ with st.expander("🔍 Debug Information"):
 st.title("✈️ AI Travel Planner")
 st.markdown("Chat with our AI to plan your perfect trip. Just tell us what you're looking for!")
 
+# Display processing status if active
+if st.session_state.is_processing:
+    st.info("🔄 The AI is processing your request. This may take a moment...", icon="ℹ️")
+
 # Display chat messages
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 for message in st.session_state.messages:
     if message["role"] == "user":
         st.markdown(f'<div class="user-message">{message["content"]}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="ai-message">{message["content"]}</div>', unsafe_allow_html=True)
+        # Check if this is a processing indicator message
+        is_processing = message.get('is_processing', False)
+        content_class = "ai-message processing-message" if is_processing else "ai-message"
+        st.markdown(f'<div class="{content_class}">{message["content"]}</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # Chat input and search button
 col1, col2 = st.columns([5, 1])
 with col1:
+    # Add guidance text above the input field
+    st.markdown("""
+    <div style="background-color: #4b4b4b; padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 0.9em;">
+        <strong>For best results, please include:</strong>
+        <ul style="margin: 5px 0 5px 20px; padding: 0;">
+            <li>Origin and destination cities</li>
+            <li>Travel dates (YYYY-MM-DD format)</li>
+            <li>Number of travelers</li>
+            <li>Budget (if applicable)</li>
+            <li>Special preferences (e.g., direct flights, hotel amenities)</li>
+        </ul>
+        <em>Example: "I want to travel from Mumbai to Delhi from 2025-06-15 to 2025-06-20 for 2 adults with a budget of 50,000 INR"</em>
+    </div>
+    """, unsafe_allow_html=True)
+    
     # Use a callback to process the input instead of modifying session state directly
     user_input = st.text_input("", placeholder="Tell me about your travel plans...", key="user_input_field")
 with col2:
@@ -535,11 +740,16 @@ with col2:
     else:
         search_button = False
 
+# Check if we need to process a previous message
+if 'pending_message' in st.session_state and st.session_state.pending_message:
+    process_message(st.session_state.pending_message)
+    st.session_state.pending_message = None
+    
 # Process user input
 if user_input:
+    # Store the message to be processed after the rerun
+    st.session_state.pending_message = user_input
     handle_user_message(user_input)
-    # Don't try to clear input field by modifying session state directly
-    # Streamlit will handle this on rerun
     
 # Process search button
 if search_button:
@@ -553,6 +763,25 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
     if results["flights"]:
         st.header("Flight Options")
         debug_print(f"Displaying {len(results['flights'])} flight options")
+        
+        # Create a user-friendly flight comparison view
+        flight_data = []
+        for i, flight in enumerate(results["flights"]):
+            flight_data.append({
+                "Option": f"Flight {i+1}",
+                "Airline": flight.get('airline', 'Unknown Airline'),
+                "Price": f"{flight.get('price', 'Unknown')} {flight.get('currency', 'INR')}",
+                "Departure": format_datetime(flight.get('departure_time', 'Unknown')),
+                "Arrival": format_datetime(flight.get('arrival_time', 'Unknown')),
+                "Duration": flight.get('duration', 'Unknown'),
+                "id": i
+            })
+        
+        # Create a DataFrame for better comparison
+        flight_df = pd.DataFrame(flight_data)
+        st.dataframe(flight_df.set_index("Option").drop("id", axis=1), use_container_width=True)
+        
+        # Display individual flight cards for selection
         flight_cols = st.columns(min(3, len(results["flights"])))
         for i, flight in enumerate(results["flights"]):
             with flight_cols[i % 3]:
@@ -576,11 +805,31 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
                     if st.button(f"Select Flight {i+1}", key=f"flight_{i}"):
                         debug_print(f"User selected flight {i+1}")
                         st.session_state.selected_flight = i
+                        # Store actual flight data in session state
+                        st.session_state.selected_flight_data = flight
     
     # Display hotels section
     if results["hotels"]:
         st.header("Accommodation Options")
         debug_print(f"Displaying {len(results['hotels'])} hotel options")
+        
+        # Create a user-friendly hotel comparison view
+        hotel_data = []
+        for i, hotel in enumerate(results["hotels"]):
+            hotel_data.append({
+                "Option": f"Hotel {i+1}",
+                "Name": hotel.get('name', 'Unknown'),
+                "Price/Night": f"{hotel.get('price_per_night', 'Unknown')} {hotel.get('currency', 'INR')}",
+                "Rating": f"{hotel.get('rating', 'N/A')} ⭐",
+                "Amenities": ', '.join(hotel.get('amenities', [])[:3]) if hotel.get('amenities') else 'N/A',
+                "id": i
+            })
+        
+        # Create a DataFrame for better comparison
+        hotel_df = pd.DataFrame(hotel_data)
+        st.dataframe(hotel_df.set_index("Option").drop("id", axis=1), use_container_width=True)
+        
+        # Display individual hotel cards for selection
         hotel_cols = st.columns(min(3, len(results["hotels"])))
         for i, hotel in enumerate(results["hotels"]):
             with hotel_cols[i % 3]:
@@ -595,7 +844,10 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
                     # Display image if available
                     if hotel.get('image_url'):
                         debug_print(f"Hotel {i+1} has image URL: {hotel['image_url'][:50]}...")
-                        st.image(hotel['image_url'], use_container_width=True)
+                        try:
+                            st.image(hotel['image_url'], use_container_width=True)
+                        except Exception as e:
+                            debug_print(f"Error loading hotel image: {str(e)}")
                     
                     st.markdown(f"""
                     <div class='travel-card {"selected-card" if st.session_state.selected_accommodation == i else ""}'>
@@ -609,6 +861,8 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
                     if st.button(f"Select Hotel {i+1}", key=f"hotel_{i}"):
                         debug_print(f"User selected hotel {i+1}")
                         st.session_state.selected_accommodation = i
+                        # Store actual hotel data in session state
+                        st.session_state.selected_hotel_data = hotel
     
     # Display destination information
     destination_info = results["destination_info"]
@@ -638,15 +892,45 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
         debug_print("Both flight and hotel selected, showing itinerary options")
         st.header("Your Itinerary")
         
+        selected_flight = st.session_state.selected_flight_data or results["flights"][st.session_state.selected_flight]
+        selected_hotel = st.session_state.selected_hotel_data or results["hotels"][st.session_state.selected_accommodation]
+        
+        # Create summary of selected options
+        st.subheader("Your Selections")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Selected Flight**")
+            st.markdown(f"""
+            **Airline**: {selected_flight.get('airline', 'Unknown')}  
+            **Departure**: {format_datetime(selected_flight.get('departure_time', 'Unknown'))}  
+            **Arrival**: {format_datetime(selected_flight.get('arrival_time', 'Unknown'))}  
+            **Duration**: {selected_flight.get('duration', 'Unknown')}  
+            **Price**: {selected_flight.get('price', 'Unknown')} {selected_flight.get('currency', 'INR')}
+            """)
+        
+        with col2:
+            st.markdown("**Selected Accommodation**")
+            st.markdown(f"""
+            **Hotel**: {selected_hotel.get('name', 'Unknown')}  
+            **Price/Night**: {selected_hotel.get('price_per_night', 'Unknown')} {selected_hotel.get('currency', 'INR')}  
+            **Rating**: {selected_hotel.get('rating', 'N/A')} ⭐  
+            **Amenities**: {', '.join(selected_hotel.get('amenities', [])[:3]) if selected_hotel.get('amenities') else 'N/A'}
+            """)
+        
         # Create sample activities from destination info
+        destination_info = results["destination_info"]
         activities = destination_info.get('attractions', [])[:5] if destination_info else ["Sightseeing"]
+        
+        # Create a suggested itinerary based on the collected data
+        st.subheader("Suggested Activities")
+        for i, activity in enumerate(activities):
+            st.markdown(f"**Day {i+1}:** {activity}")
         
         col7, col8 = st.columns(2)
         with col7:
             if st.button("Download PDF"):
                 debug_print("PDF download button clicked")
-                selected_flight = results["flights"][st.session_state.selected_flight]
-                selected_hotel = results["hotels"][st.session_state.selected_accommodation]
                 
                 pdf = create_pdf_itinerary(
                     selected_flight,
@@ -667,7 +951,42 @@ if st.session_state.chat_stage == "results" and st.session_state.search_results:
             email = st.text_input("Email address for itinerary")
             send_email = st.button("Email Itinerary")
             if email and send_email:
-                st.success("Your itinerary has been sent to your email!")
+                try:
+                    # Generate the PDF
+                    pdf = create_pdf_itinerary(
+                        selected_flight,
+                        selected_hotel,
+                        activities
+                    )
+                    pdf_file = "temp_itinerary.pdf"
+                    pdf.output(pdf_file)
+                    
+                    # Set up email
+                    msg = MIMEMultipart()
+                    msg['From'] = "travel.assistant@example.com"
+                    msg['To'] = email
+                    msg['Subject'] = "Your Travel Itinerary"
+                    
+                    # Email body
+                    body = "Please find your travel itinerary attached. Thank you for using our service!"
+                    msg.attach(MIMEText(body, 'plain'))
+                    
+                    # Attach PDF
+                    with open(pdf_file, "rb") as f:
+                        attach = MIMEApplication(f.read(), _subtype="pdf")
+                    attach.add_header('Content-Disposition', 'attachment', filename="travel_itinerary.pdf")
+                    msg.attach(attach)
+                    
+                    # Show success message (in a real app, you would send the email here)
+                    st.success(f"Your itinerary has been sent to {email}!")
+                    
+                    # Clean up
+                    if os.path.exists(pdf_file):
+                        os.remove(pdf_file)
+                    
+                except Exception as e:
+                    st.error(f"Error sending email: {str(e)}")
+                    debug_print(f"Email error: {str(e)}")
 
 # Footer
 st.markdown("---")

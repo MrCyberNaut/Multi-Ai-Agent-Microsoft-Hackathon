@@ -1,8 +1,0 @@
-Searching flights with params: {'engine': 'google_flights', 'departure_id': 'MUMBAI', 'arrival_id': 'MANGALORE', 'outbound_date': '2025-05-03', 'return_date': '2025-05-05', 'currency': 'INR', 'hl': 'en', 'gl': 'in', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
-Error searching flights: SerpApiClient.__init__() got an unexpected keyword argument 'api_key'
-Searching hotels with params: {'engine': 'google_hotels', 'q': 'hotels in Mangalore', 'check_in_date': '2025-05-03', 'check_out_date': '2025-05-05', 'currency': 'INR', 'adults': 2, 'children': 0, 'hl': 'en', 'gl': 'in', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
-Error searching hotels: SerpApiClient.__init__() got an unexpected keyword argument 'api_key'
-Searching flights with params: {'engine': 'google_flights', 'departure_id': 'MUMBAI', 'arrival_id': 'MANGALORE', 'outbound_date': '2025-05-03', 'return_date': '2025-05-05', 'currency': 'INR', 'hl': 'en', 'gl': 'in', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
-Error searching flights: SerpApiClient.__init__() got an unexpected keyword argument 'api_key'
-Searching hotels with params: {'engine': 'google_hotels', 'q': 'hotels in Mangalore', 'check_in_date': '2025-05-03', 'check_out_date': '2025-05-05', 'currency': 'INR', 'adults': 2, 'children': 0, 'hl': 'en', 'gl': 'in', 'api_key': '765df414772965ebe077a344af5596be9bb47c2260a3a58e7a3eaa5bcfc1a669'}
-Error searching hotels: SerpApiClient.__init__() got an unexpected keyword argument 'api_key

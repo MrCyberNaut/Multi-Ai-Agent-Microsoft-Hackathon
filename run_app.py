@@ -23,7 +23,7 @@ def install_package(package_name):
 def run_streamlit_app():
     """Run the Streamlit app."""
     # Check and install required packages
-    required_packages = ["streamlit", "langgraph", "serpapi", "openai", "python-dotenv"]
+    required_packages = ["streamlit", "langgraph", "serpapi", "openai", "python-dotenv", "requests"]
     
     all_installed = True
     for package in required_packages:

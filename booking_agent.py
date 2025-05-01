@@ -11,23 +11,32 @@ from pydantic import BaseModel, Field
 import streamlit as st
 import sys
 import time
+import requests  # For Ollama API calls
 
 # Load environment variables
 load_dotenv()
+
+# Import configuration
+from config import (
+    LLM_PROVIDER,
+    OLLAMA_MODEL,
+    OLLAMA_URL,
+    MODEL_NAME,
+    TEMPERATURE,
+    MAX_TOKENS,
+    SERPAPI_TIMEOUT,
+    HITL_ENABLED,
+    HITL_MODE,
+    HITL_TIMEOUT,
+    DEBUG_MODE,
+)
 
 # Configuration
 AIMLAPI_API_KEY = os.getenv("AIMLAPI_API_KEY")
 AIMLAPI_BASE_URL = "https://api.aimlapi.com/v1"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Kept for backward compatibility
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
-MODEL_NAME = "gpt-4o"
-TEMPERATURE = 0.7
-MAX_TOKENS = 1500
 CACHE_DIR = "cache"
-HITL_ENABLED = True
-HITL_TIMEOUT = 300
-SERPAPI_TIMEOUT = 30
-SERPAPI_CACHE_DURATION = 3600
 DEBUG = True  # Enable debug output
 
 def debug_print(message):
@@ -35,17 +44,111 @@ def debug_print(message):
     if DEBUG:
         print(f"[DEBUG] {message}")
 
-# Initialize AIMLAPI client (compatible with OpenAI SDK)
-if AIMLAPI_API_KEY:
-    client = OpenAI(
-        api_key=AIMLAPI_API_KEY,
-        base_url=AIMLAPI_BASE_URL
-    )
-    debug_print(f"Using AIMLAPI client with base URL: {AIMLAPI_BASE_URL}")
-else:
-    # Fallback to OpenAI if AIMLAPI key is not set
+# Initialize API clients
+debug_print(f"Initializing with LLM provider: {LLM_PROVIDER}")
+if LLM_PROVIDER.lower() == "openai":
+    debug_print("Using OpenAI client")
     client = OpenAI(api_key=OPENAI_API_KEY)
-    debug_print("Using OpenAI client as fallback")
+elif LLM_PROVIDER.lower() == "ollama":
+    debug_print(f"Using Ollama client with model: {OLLAMA_MODEL}")
+    # No client initialization needed for Ollama as we'll use the call_ollama function
+    class OllamaWrapper:
+        def __init__(self):
+            self.chat = type('obj', (object,), {
+                'completions': type('obj', (object,), {
+                    'create': lambda **kwargs: call_ollama(
+                        kwargs.get('messages', []), 
+                        kwargs.get('temperature', TEMPERATURE), 
+                        kwargs.get('max_tokens', MAX_TOKENS)
+                    )
+                })
+            })
+    client = OllamaWrapper()
+else:
+    debug_print(f"Unknown LLM provider: {LLM_PROVIDER}, defaulting to OpenAI")
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Function to call Ollama API
+def call_ollama(messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS):
+    """Call Ollama API with messages."""
+    debug_print(f"Calling Ollama API with {len(messages)} messages")
+    try:
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
+        
+        debug_print(f"Sending request to Ollama at {OLLAMA_URL}/api/chat")
+        debug_print(f"Payload: {json.dumps(payload, indent=2)}")
+        
+        # Make the API request
+        response = requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        debug_print(f"Ollama API status code: {response.status_code}")
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            response_json = response.json()
+            debug_print(f"Ollama response: {json.dumps(response_json, indent=2)}")
+            
+            # Extract the assistant's message from the response
+            if "message" in response_json and "content" in response_json["message"]:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": response_json["message"]["content"]
+                            }
+                        }
+                    ]
+                }
+            else:
+                debug_print("Unexpected response structure from Ollama API")
+                debug_print(f"Full response: {response_json}")
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Error: Unexpected response structure from Ollama"
+                            }
+                        }
+                    ]
+                }
+        else:
+            debug_print(f"Error from Ollama API: {response.text}")
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": f"Error calling Ollama API: {response.status_code} - {response.text}"
+                        }
+                    }
+                ]
+            }
+    except Exception as e:
+        debug_print(f"Exception in call_ollama: {str(e)}")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": f"Error: {str(e)}"
+                    }
+                }
+            ]
+        }
 
 # State Management
 class TravelState(BaseModel):
@@ -65,23 +168,23 @@ SUPERVISOR_PROMPT = """You are the supervisor agent for a travel planning system
 1. Initial request analysis and task delegation
 2. Coordination between specialist agents
 3. Error handling and recovery
-4. Managing human-in-the-loop interactions
+4. Managing user interactions
 5. Ensuring all travel requirements are met
 
 Use the available tools to search for travel options and coordinate with other agents.
-Always validate critical decisions with human operators when HITL is enabled.
+""" + ("""Always validate critical decisions with human operators since Human-in-the-Loop is enabled.""" if HITL_ENABLED else """Process requests automatically without human intervention since Human-in-the-Loop is disabled.""") + """
 Maintain conversation context and handle transitions between agents smoothly."""
 
 FLIGHT_AGENT_PROMPT = """You are a flight booking specialist agent. Your key responsibilities include:
 
 1. Searching for optimal flight options using SerpAPI
 2. Analyzing and filtering results based on user preferences
-3. Presenting options clearly for human selection
+3. Presenting options clearly for user selection
 4. Handling booking-related queries and issues
 5. Coordinating with other agents for complete travel planning
 
 Always verify flight availability and pricing before presenting options.
-Get human approval for final flight selections.
+""" + ("""Get human approval for final flight selections.""" if HITL_ENABLED else """Process flight selections automatically without human intervention.""") + """
 Handle errors gracefully and suggest alternatives when needed."""
 
 HOTEL_AGENT_PROMPT = """You are a hotel booking specialist agent. Your key responsibilities include:
@@ -89,11 +192,11 @@ HOTEL_AGENT_PROMPT = """You are a hotel booking specialist agent. Your key respo
 1. Finding suitable accommodations using SerpAPI
 2. Matching hotels to user preferences and budget
 3. Verifying availability and amenities
-4. Presenting options clearly for human selection
+4. Presenting options clearly for user selection
 5. Coordinating with other agents for complete travel planning
 
 Consider location, ratings, and reviews when selecting options.
-Get human approval for final hotel selections.
+""" + ("""Get human approval for final hotel selections.""" if HITL_ENABLED else """Process hotel selections automatically without human intervention.""") + """
 Handle errors gracefully and suggest alternatives when needed."""
 
 ITINERARY_AGENT_PROMPT = """You are an itinerary planning specialist. Your key responsibilities include:
@@ -102,11 +205,12 @@ ITINERARY_AGENT_PROMPT = """You are an itinerary planning specialist. Your key r
 2. Incorporating flight and hotel bookings
 3. Suggesting activities and attractions
 4. Optimizing timing and logistics
-5. Getting human approval for plans
+5. Providing a complete travel plan
 
 Use SerpAPI to find local attractions and activities.
 Consider travel times, check-in/out times, and local conditions.
-Allow for flexibility and human customization of plans."""
+""" + ("""Allow for flexibility and human customization of plans.""" if HITL_ENABLED else """Generate complete itineraries automatically.""") + """
+"""
 
 # SerpAPI Utility Functions
 def _get_cache_path(query_hash: str) -> str:
@@ -546,14 +650,54 @@ def get_human_approval(data: Dict[str, Any], context: str) -> bool:
         debug_print("HITL disabled, automatically approving")
         return True
     
-    print("\n=== Human Approval Required ===")
-    print(f"Context: {context}")
-    print("Data to approve:")
-    print(json.dumps(data, indent=2))
+    # Check if running in Streamlit mode
+    in_streamlit = 'streamlit' in sys.modules and HITL_MODE == "streamlit"
     
-    response = input("\nDo you approve? (yes/no): ").lower().strip()
-    debug_print(f"Human approval response: {response}")
-    return response in ['y', 'yes']
+    if in_streamlit:
+        import streamlit as st
+        # Store the approval request in session state
+        if 'hitl_approval_request' not in st.session_state:
+            st.session_state.hitl_approval_request = {
+                'data': data,
+                'context': context,
+                'timestamp': datetime.now().timestamp(),
+                'type': 'approval',
+                'pending': True,
+                'result': None
+            }
+            debug_print("Stored HITL approval request in session state")
+            # Force a rerun to display the approval UI
+            st.rerun()
+        else:
+            # Check if there's a result from a previous approval
+            if not st.session_state.hitl_approval_request['pending']:
+                result = st.session_state.hitl_approval_request['result']
+                # Clear the request
+                st.session_state.hitl_approval_request = None
+                debug_print(f"Retrieved HITL approval result: {result}")
+                return result
+            
+            # If we're still waiting for approval but timeout has passed
+            current_time = datetime.now().timestamp()
+            if current_time - st.session_state.hitl_approval_request['timestamp'] > HITL_TIMEOUT:
+                debug_print("HITL approval timed out, automatically approving")
+                st.session_state.hitl_approval_request = None
+                return True
+            
+            # Otherwise, we're still waiting
+            debug_print("Still waiting for HITL approval")
+            time.sleep(1)  # Small delay to avoid tight loop
+            st.rerun()  # Force a rerun to check again
+    else:
+        # CLI mode
+        print("\n=== Human Approval Required ===")
+        print(f"Context: {context}")
+        print("Data to approve:")
+        print(json.dumps(data, indent=2))
+        
+        response = input("\nDo you approve? (yes/no): ").lower().strip()
+        debug_print(f"Human approval response: {response}")
+        return response in ['y', 'yes']
 
 def get_human_selection(options: List[Dict[str, Any]], context: str) -> Optional[Dict[str, Any]]:
     """Get human selection from a list of options."""
@@ -563,22 +707,61 @@ def get_human_selection(options: List[Dict[str, Any]], context: str) -> Optional
         debug_print("HITL disabled, automatically selecting first option")
         return options[0] if options else None
     
-    print("\n=== Human Selection Required ===")
-    print(f"Context: {context}")
-    print("\nAvailable options:")
+    # Check if running in Streamlit mode
+    in_streamlit = 'streamlit' in sys.modules and HITL_MODE == "streamlit"
     
-    for i, option in enumerate(options, 1):
-        print(f"\n{i}. {json.dumps(option, indent=2)}")
-    
-    while True:
-        try:
-            choice = int(input("\nEnter your choice (number): "))
-            if 1 <= choice <= len(options):
-                debug_print(f"Human selected option {choice}")
-                return options[choice - 1]
-            print("Invalid choice. Please try again.")
-        except ValueError:
-            print("Please enter a valid number.")
+    if in_streamlit:
+        # Store the selection request in session state
+        if 'hitl_selection_request' not in st.session_state:
+            st.session_state.hitl_selection_request = {
+                'options': options,
+                'context': context,
+                'timestamp': datetime.now().timestamp(),
+                'type': 'selection',
+                'pending': True,
+                'result': None
+            }
+            debug_print("Stored HITL selection request in session state")
+            # Force a rerun to display the selection UI
+            st.rerun()
+        else:
+            # Check if there's a result from a previous selection
+            if not st.session_state.hitl_selection_request['pending']:
+                result = st.session_state.hitl_selection_request['result']
+                # Clear the request
+                st.session_state.hitl_selection_request = None
+                debug_print(f"Retrieved HITL selection result: {options.index(result) if result in options else 'none'}")
+                return result
+            
+            # If we're still waiting for selection but timeout has passed
+            current_time = datetime.now().timestamp()
+            if current_time - st.session_state.hitl_selection_request['timestamp'] > HITL_TIMEOUT:
+                debug_print("HITL selection timed out, automatically selecting first option")
+                st.session_state.hitl_selection_request = None
+                return options[0] if options else None
+            
+            # Otherwise, we're still waiting
+            debug_print("Still waiting for HITL selection")
+            time.sleep(1)  # Small delay to avoid tight loop
+            st.rerun()  # Force a rerun to check again
+    else:
+        # CLI mode
+        print("\n=== Human Selection Required ===")
+        print(f"Context: {context}")
+        print("\nAvailable options:")
+        
+        for i, option in enumerate(options, 1):
+            print(f"\n{i}. {json.dumps(option, indent=2)}")
+        
+        while True:
+            try:
+                choice = int(input("\nEnter your choice (number): "))
+                if 1 <= choice <= len(options):
+                    debug_print(f"Human selected option {choice}")
+                    return options[choice - 1]
+                print("Invalid choice. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
 
 def handle_error(error: Union[str, Dict[str, Any]], context: str) -> Dict[str, Any]:
     """Handle errors with human intervention."""
@@ -588,19 +771,64 @@ def handle_error(error: Union[str, Dict[str, Any]], context: str) -> Dict[str, A
         debug_print("HITL disabled, returning error status")
         return {"status": "error", "message": str(error)}
     
-    print("\n=== Error Resolution Required ===")
-    print(f"Context: {context}")
-    print(f"Error: {error}")
+    # Check if running in Streamlit mode
+    in_streamlit = 'streamlit' in sys.modules and HITL_MODE == "streamlit"
     
-    resolution = input("How would you like to resolve this error? ").strip()
-    debug_print(f"Human resolution: {resolution}")
-    
-    return {
-        "status": "resolved" if resolution else "error",
-        "original_error": error,
-        "resolution": resolution,
-        "timestamp": datetime.now().isoformat()
-    }
+    if in_streamlit:
+        import streamlit as st
+        # Store the error resolution request in session state
+        if 'hitl_error_request' not in st.session_state:
+            st.session_state.hitl_error_request = {
+                'error': error,
+                'context': context,
+                'timestamp': datetime.now().timestamp(),
+                'type': 'error',
+                'pending': True,
+                'resolution': None
+            }
+            debug_print("Stored HITL error resolution request in session state")
+            # Force a rerun to display the error resolution UI
+            st.rerun()
+        else:
+            # Check if there's a resolution from a previous error
+            if not st.session_state.hitl_error_request['pending']:
+                resolution = st.session_state.hitl_error_request['resolution']
+                # Clear the request
+                st.session_state.hitl_error_request = None
+                debug_print(f"Retrieved HITL error resolution: {resolution}")
+                return {
+                    "status": "resolved" if resolution else "error",
+                    "original_error": error,
+                    "resolution": resolution,
+                    "timestamp": datetime.now().isoformat()
+                }
+            
+            # If we're still waiting for resolution but timeout has passed
+            current_time = datetime.now().timestamp()
+            if current_time - st.session_state.hitl_error_request['timestamp'] > HITL_TIMEOUT:
+                debug_print("HITL error resolution timed out, returning error status")
+                st.session_state.hitl_error_request = None
+                return {"status": "error", "message": str(error)}
+            
+            # Otherwise, we're still waiting
+            debug_print("Still waiting for HITL error resolution")
+            time.sleep(1)  # Small delay to avoid tight loop
+            st.rerun()  # Force a rerun to check again
+    else:
+        # CLI mode
+        print("\n=== Error Resolution Required ===")
+        print(f"Context: {context}")
+        print(f"Error: {error}")
+        
+        resolution = input("How would you like to resolve this error? ").strip()
+        debug_print(f"Human resolution: {resolution}")
+        
+        return {
+            "status": "resolved" if resolution else "error",
+            "original_error": error,
+            "resolution": resolution,
+            "timestamp": datetime.now().isoformat()
+        }
 
 # Agent Functions
 def supervisor_agent(state: TravelState) -> Dict[str, Any]:
@@ -612,14 +840,18 @@ def supervisor_agent(state: TravelState) -> Dict[str, Any]:
     
     debug_print(f"Calling supervisor LLM with {len(messages)} messages")
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS
-        )
-        
-        assistant_message = response.choices[0].message.content
+        if LLM_PROVIDER.lower() == "ollama":
+            response = call_ollama(messages, TEMPERATURE, MAX_TOKENS)
+            assistant_message = response["choices"][0]["message"]["content"]
+        else:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            assistant_message = response.choices[0].message.content
+            
         debug_print(f"Received response from LLM: {assistant_message[:50]}...")
         
         # Update messages with the assistant's response
@@ -627,7 +859,7 @@ def supervisor_agent(state: TravelState) -> Dict[str, Any]:
         debug_print("Supervisor agent completed")
         return {"messages": updated_messages}
     except Exception as e:
-        error_msg = f"Error calling OpenAI API: {str(e)}"
+        error_msg = f"Error calling LLM API: {str(e)}"
         debug_print(error_msg)
         return {"messages": messages, "error": error_msg}
 
@@ -640,14 +872,18 @@ def flight_agent(state: TravelState) -> Dict[str, Any]:
     
     debug_print(f"Calling flight agent LLM with {len(messages)} messages")
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS
-        )
-        
-        assistant_message = response.choices[0].message.content
+        if LLM_PROVIDER.lower() == "ollama":
+            response = call_ollama(messages, TEMPERATURE, MAX_TOKENS)
+            assistant_message = response["choices"][0]["message"]["content"]
+        else:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            assistant_message = response.choices[0].message.content
+            
         debug_print(f"Received response from LLM: {assistant_message[:50]}...")
         
         # Update messages with the assistant's response
@@ -655,7 +891,7 @@ def flight_agent(state: TravelState) -> Dict[str, Any]:
         debug_print("Flight agent completed")
         return {"messages": updated_messages}
     except Exception as e:
-        error_msg = f"Error calling OpenAI API: {str(e)}"
+        error_msg = f"Error calling LLM API: {str(e)}"
         debug_print(error_msg)
         return {"messages": messages, "error": error_msg}
 
@@ -668,14 +904,18 @@ def hotel_agent(state: TravelState) -> Dict[str, Any]:
     
     debug_print(f"Calling hotel agent LLM with {len(messages)} messages")
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS
-        )
-        
-        assistant_message = response.choices[0].message.content
+        if LLM_PROVIDER.lower() == "ollama":
+            response = call_ollama(messages, TEMPERATURE, MAX_TOKENS)
+            assistant_message = response["choices"][0]["message"]["content"]
+        else:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            assistant_message = response.choices[0].message.content
+            
         debug_print(f"Received response from LLM: {assistant_message[:50]}...")
         
         # Update messages with the assistant's response
@@ -683,7 +923,7 @@ def hotel_agent(state: TravelState) -> Dict[str, Any]:
         debug_print("Hotel agent completed")
         return {"messages": updated_messages}
     except Exception as e:
-        error_msg = f"Error calling OpenAI API: {str(e)}"
+        error_msg = f"Error calling LLM API: {str(e)}"
         debug_print(error_msg)
         return {"messages": messages, "error": error_msg}
 
@@ -705,14 +945,18 @@ This will help ensure the conversation reaches a natural conclusion.
     
     debug_print(f"Calling itinerary agent LLM with {len(messages)} messages")
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS
-        )
-        
-        assistant_message = response.choices[0].message.content
+        if LLM_PROVIDER.lower() == "ollama":
+            response = call_ollama(messages, TEMPERATURE, MAX_TOKENS)
+            assistant_message = response["choices"][0]["message"]["content"]
+        else:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            assistant_message = response.choices[0].message.content
+            
         debug_print(f"Received response from LLM: {assistant_message[:50]}...")
         
         # Update messages with the assistant's response
@@ -720,7 +964,7 @@ This will help ensure the conversation reaches a natural conclusion.
         debug_print("Itinerary agent completed")
         return {"messages": updated_messages}
     except Exception as e:
-        error_msg = f"Error calling OpenAI API: {str(e)}"
+        error_msg = f"Error calling LLM API: {str(e)}"
         debug_print(error_msg)
         return {"messages": messages, "error": error_msg}
 
@@ -733,23 +977,46 @@ def router(state: TravelState) -> str:
     last_message = state.messages[-1]["content"].lower() if state.messages[-1].get("content") else ""
     debug_print(f"Routing based on message: {last_message[:50]}...")
     
-    # Check for terminal conditions
-    if "final itinerary" in last_message or "thank you" in last_message or "goodbye" in last_message:
-        debug_print("Terminal condition detected, ending graph")
+    # More comprehensive check for terminal conditions
+    terminal_phrases = [
+        "final itinerary", 
+        "thank you", 
+        "goodbye", 
+        "thank you for your help",
+        "anything else you'd like to know",
+        "is there anything else you'd like to know",
+        "is there anything else i can help you with",
+        "this completes your",
+        "completed your request",
+        "all set",
+        "all done"
+    ]
+    
+    # Check if any terminal phrase is in the message
+    if any(phrase in last_message for phrase in terminal_phrases):
+        debug_print(f"Terminal condition detected: '{next((phrase for phrase in terminal_phrases if phrase in last_message), '')}'")
         return END
     
     # Add recursion counter to prevent infinite loops
-    if len(state.messages) > 20:  # Set a reasonable threshold
-        debug_print("Message count threshold exceeded, ending graph to prevent recursion")
+    if len(state.messages) > 15:  # Reduced threshold to prevent long conversations
+        debug_print(f"Message count threshold exceeded ({len(state.messages)} > 15), ending graph to prevent recursion")
         return END
     
-    if "flight" in last_message or "book a trip" in last_message:
+    # Check for search completion patterns
+    if ("found" in last_message and any(word in last_message for word in ["flight", "hotel"])) or \
+       "search results" in last_message or \
+       "search completed" in last_message:
+        debug_print("Search completion detected, ending graph")
+        return END
+    
+    # More specific routing based on message content
+    if any(flight_term in last_message for flight_term in ["flight", "book a trip", "travel from", "fly to", "booking", "airline"]):
         debug_print("Routing to flight_agent")
         return "flight_agent"
-    elif "hotel" in last_message or "accommodation" in last_message:
+    elif any(hotel_term in last_message for hotel_term in ["hotel", "accommodation", "place to stay", "lodging", "room"]):
         debug_print("Routing to hotel_agent")
         return "hotel_agent"
-    elif "itinerary" in last_message or "plan" in last_message:
+    elif any(itinerary_term in last_message for itinerary_term in ["itinerary", "plan", "schedule", "activities", "attractions"]):
         debug_print("Routing to itinerary_agent")
         return "itinerary_agent"
     else:
@@ -762,7 +1029,7 @@ def create_travel_graph() -> StateGraph:
     workflow = StateGraph(TravelState)
     
     # Set recursion limit directly on the StateGraph instance
-    workflow.recursion_limit = 50
+    workflow.recursion_limit = 200  # Increased from 50 to 200
     
     # Add nodes
     debug_print("Adding graph nodes")

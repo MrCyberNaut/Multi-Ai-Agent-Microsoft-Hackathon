@@ -1,20 +1,26 @@
 # Required Environment Variables for Travel Assistant
 
 # OpenAI API Key (Required)
-OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_API_KEY=""
+AIMLAPI_API_KEY=""
 
 # SerpAPI Key (Required)
 # Get from https://serpapi.com/dashboard
-SERPAPI_API_KEY=your_serpapi_api_key_here
+SERPAPI_API_KEY="serpapi_api_key"
 
-# Optional API Keys (if using alternative services)
-AMADEUS_API_KEY=your_amadeus_api_key_here
-AMADEUS_API_SECRET=your_amadeus_api_secret_here
-HOTEL_API_KEY=your_hotel_api_key_here
+
 
 # Configuration Settings
-DEBUG_MODE=True
-LOG_LEVEL=INFO
+DEBUG_MODE="True"
+LOG_LEVEL="INFO"
+
+# LLM Provider Settings
+# Options: "openai", "ollama" 
+LLM_PROVIDER="ollama"
+
+# Ollama Settings (only used when LLM_PROVIDER=ollama)
+OLLAMA_MODEL="llama3.2"
+OLLAMA_URL="http://localhost:11434"
 
 # Note: Create a .env file with these variables in the project root
 # Make sure to replace the placeholder values with your actual API keys
